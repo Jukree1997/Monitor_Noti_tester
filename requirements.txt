@@ -1,8 +1,13 @@
 PySide6>=6.6
-ultralytics>=8.0
 opencv-python>=4.8
 numpy>=1.24
 scipy>=1.10
 requests>=2.31
 boto3>=1.34
 openpyxl>=3.1
+# Detection + tracking — replaces ultralytics (AGPL) per Phase 1 of
+# ultralytics-replacement.md. supervision is a transitive dep of trackers.
+onnxruntime-gpu>=1.21,<2  # ONNX inference backend
+nvidia-cudnn-cu12>=9.0    # cuDNN bundle for CUDAExecutionProvider
+trackers>=2.3,<3          # ByteTrackTracker — Apache 2.0
+supervision>=0.28,<1      # sv.Detections — input/output shape for trackers

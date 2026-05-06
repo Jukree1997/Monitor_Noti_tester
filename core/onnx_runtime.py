@@ -1,0 +1,325 @@
+"""ONNX-Runtime-based YOLO inference wrapper.
+
+MIRROR: source of truth is Smart_Relabeler_V2/core/onnx_runtime.py. Keep
+this file in sync — there's no shared package yet (Phase 1 of
+ultralytics-replacement.md). When you fix a bug or add an argument here,
+copy the change back across the Baksters_Tools repos that use this
+wrapper. A future refactor may extract these into a single package; until
+then, the duplication is the simpler trade.
+"""
+
+# ======================================
+# -------- 0. IMPORTS --------
+# ======================================
+
+from __future__ import annotations
+import ctypes
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable, Iterator, Sequence, Union
+
+import cv2
+import numpy as np
+
+
+# ======================================
+# -------- 0a. CUDNN PRELOAD --------
+# ======================================
+
+# onnxruntime-gpu dlopens libcudnn.so.9 lazily and fails silently to CPU if
+# it can't find it on LD_LIBRARY_PATH. The pip-installed nvidia-cudnn-cu12
+# package bundles the libs under site-packages/nvidia/cudnn/lib/ — preload
+# them with RTLD_GLOBAL so onnxruntime's later dlopen() finds them in the
+# process symbol table without touching LD_LIBRARY_PATH or system state.
+def _preload_cudnn() -> None:
+    try:
+        import nvidia.cudnn  # type: ignore[import-untyped]
+    except ImportError:
+        return  # cuDNN not installed — onnxruntime falls back to CPU
+    # nvidia.cudnn is a PEP-420 namespace package, so __file__ is None;
+    # __path__ is the canonical way to locate it.
+    cudnn_dir = Path(list(nvidia.cudnn.__path__)[0]) / "lib"
+    if not cudnn_dir.is_dir():
+        return
+    # Order matters — base libcudnn.so.9 first, then the engines that depend on it.
+    for name in ("libcudnn.so.9", "libcudnn_graph.so.9", "libcudnn_ops.so.9",
+                 "libcudnn_adv.so.9", "libcudnn_cnn.so.9", "libcudnn_engines_precompiled.so.9",
+                 "libcudnn_engines_runtime_compiled.so.9"):
+        p = cudnn_dir / name
+        if p.is_file():
+            try:
+                ctypes.CDLL(str(p), mode=ctypes.RTLD_GLOBAL)
+            except OSError:
+                pass  # one missing engine shouldn't break the rest
+
+
+_preload_cudnn()
+import onnxruntime as ort  # noqa: E402  — must come after cuDNN preload
+
+
+# ======================================
+# -------- 1. RESULT WRAPPER TYPES --------
+# ======================================
+
+# These mimic the slice of the `ultralytics.engine.results.Results` API that
+# auto_labeler / smart_relabeler actually touch — `.boxes` iterable; each box
+# supports `.cls[0]`, `.conf[0]`, `.xywhn[0].tolist()`. Keeping the same
+# duck-typed surface means existing call-site code (`for box in r.boxes:
+# coco_cls = int(box.cls[0])`) does not change.
+
+@dataclass
+class _OnnxBox:
+    cls: np.ndarray    # shape (1,)  int64   class id
+    conf: np.ndarray   # shape (1,)  float32 confidence
+    xywhn: np.ndarray  # shape (1,4) float32 normalized cx, cy, w, h
+
+
+@dataclass
+class _OnnxResult:
+    boxes: list[_OnnxBox] = field(default_factory=list)
+    names: dict[int, str] = field(default_factory=dict)  # class id → name
+    obb: None = None  # oriented bounding boxes — always None for axis-aligned models
+
+
+# ======================================
+# -------- 2. DETECTOR --------
+# ======================================
+
+ImageOrPath = Union[str, Path, np.ndarray]
+
+
+class OnnxYoloDetector:
+    """ONNX-Runtime-backed YOLO detector.
+
+    Loads a YOLO ONNX file (exported with `dynamic=True, simplify=True` from
+    ultralytics, or any future RF-DETR-style export with the same I/O shape)
+    and runs inference via `onnxruntime-gpu`. Falls back to CPU automatically
+    if no CUDA provider is available.
+    """
+
+    def __init__(self, model_path: ImageOrPath, imgsz: int = 640):
+        self._path = str(model_path)
+        # CUDA first, CPU fallback. Per the ONNX docs, listing CPU last lets
+        # the runtime pick CUDA when available without us having to detect it.
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        self._session = ort.InferenceSession(self._path, providers=providers)
+        self._input_name = self._session.get_inputs()[0].name
+        self._imgsz = int(imgsz)
+        self._names = self._extract_class_names()
+
+    @property
+    def names(self) -> dict[int, str]:
+        """Class id → name. Populated from ultralytics-export metadata when
+        present, else empty (callers should use the int id as a label)."""
+        return self._names
+
+    def _extract_class_names(self) -> dict[int, str]:
+        """ultralytics' ONNX export writes the {0: "person", ...} dict into
+        the model's `metadata.names` custom map. Recover it here so result
+        consumers can do `result.names[cls_id]` like they did with YOLO."""
+        try:
+            meta = self._session.get_modelmeta().custom_metadata_map
+            raw = meta.get("names")
+            if not raw:
+                return {}
+            # ultralytics serializes as a Python-repr-like string, e.g.
+            # "{0: 'person', 1: 'bicycle', ...}". `ast.literal_eval` parses
+            # that safely without exec.
+            import ast
+            parsed = ast.literal_eval(raw)
+            if isinstance(parsed, dict):
+                return {int(k): str(v) for k, v in parsed.items()}
+        except (ValueError, SyntaxError, AttributeError):
+            pass
+        return {}
+
+    # ======================================
+    # -------- 3. PUBLIC PREDICT API --------
+    # ======================================
+
+    def predict(
+        self,
+        source: Union[ImageOrPath, Sequence[ImageOrPath]],
+        conf: float = 0.25,
+        iou: float = 0.45,
+        classes: Sequence[int] | None = None,
+        max_det: int = 300,
+        stream: bool = True,
+        imgsz: int | None = None,
+        # Ignored kwargs accepted for ultralytics-API compatibility:
+        augment: bool = False, half: bool = False, verbose: bool = False,
+        device: str | None = None,
+        **_kwargs,
+    ) -> Iterator[_OnnxResult] | list[_OnnxResult]:
+        """Run inference. Returns a generator (stream=True) or a list."""
+        sources = self._normalize_source(source)
+        target_size = int(imgsz) if imgsz else self._imgsz
+        gen = self._predict_iter(
+            sources, conf=conf, iou=iou, classes=classes, max_det=max_det,
+            target_size=target_size)
+        return gen if stream else list(gen)
+
+    def __call__(self, source, **kwargs):
+        # When called as `model(frame, ...)` (no `.predict`), default to
+        # non-streaming so the result is a list — matches ultralytics so
+        # `results[0]` keeps working at call sites that expect indexing.
+        kwargs.setdefault("stream", False)
+        return self.predict(source, **kwargs)
+
+    # ======================================
+    # -------- 4. ITERATION CORE --------
+    # ======================================
+
+    def _predict_iter(
+        self,
+        sources: Sequence[ImageOrPath],
+        conf: float, iou: float,
+        classes: Sequence[int] | None, max_det: int,
+        target_size: int,
+    ) -> Iterator[_OnnxResult]:
+        """Yield one _OnnxResult per source. Unreadable images yield empty."""
+        cls_filter = set(int(c) for c in classes) if classes else None
+        for src in sources:
+            img = self._read_image(src)
+            if img is None:
+                yield _OnnxResult(names=self._names)
+                continue
+            yield self._predict_one(img, conf, iou, cls_filter, max_det, target_size)
+
+    def _predict_one(
+        self, img_bgr: np.ndarray, conf: float, iou: float,
+        cls_filter: set[int] | None, max_det: int, target_size: int,
+    ) -> _OnnxResult:
+        h0, w0 = img_bgr.shape[:2]
+        inp, scale, pad_top, pad_left = self._letterbox(img_bgr, target_size)
+        outputs = self._session.run(None, {self._input_name: inp})
+        result = self._postprocess(
+            outputs[0], (h0, w0), scale, pad_top, pad_left,
+            conf, iou, cls_filter, max_det)
+        result.names = self._names
+        return result
+
+    # ======================================
+    # -------- 5. PRE-PROCESS (LETTERBOX) --------
+    # ======================================
+
+    @staticmethod
+    def _letterbox(
+        img_bgr: np.ndarray, target: int,
+    ) -> tuple[np.ndarray, float, int, int]:
+        """Resize-and-pad to a square `target` keeping aspect ratio.
+
+        Mismatched letterbox between training and inference is the #1 cause
+        of mAP drop after an ONNX export — keep this consistent with what
+        ultralytics does (same scale for h+w, gray=114 padding, RGB+CHW).
+        """
+        h, w = img_bgr.shape[:2]
+        scale = min(target / h, target / w)
+        new_h, new_w = int(round(h * scale)), int(round(w * scale))
+        resized = cv2.resize(img_bgr, (new_w, new_h),
+                             interpolation=cv2.INTER_LINEAR)
+        pad_top = (target - new_h) // 2
+        pad_bottom = target - new_h - pad_top
+        pad_left = (target - new_w) // 2
+        pad_right = target - new_w - pad_left
+        padded = cv2.copyMakeBorder(
+            resized, pad_top, pad_bottom, pad_left, pad_right,
+            cv2.BORDER_CONSTANT, value=(114, 114, 114))
+        rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
+        chw = np.transpose(rgb, (2, 0, 1)).astype(np.float32) / 255.0
+        return chw[np.newaxis, ...], scale, pad_top, pad_left
+
+    # ======================================
+    # -------- 6. POST-PROCESS (NMS + DELETTERBOX) --------
+    # ======================================
+
+    def _postprocess(
+        self, raw: np.ndarray, orig_hw: tuple[int, int],
+        scale: float, pad_top: int, pad_left: int,
+        conf_thr: float, iou_thr: float,
+        cls_filter: set[int] | None, max_det: int,
+    ) -> _OnnxResult:
+        # YOLO11 export shape is (1, 4+nc, A); transpose to (A, 4+nc) so each
+        # row is one anchor. Some exports flip this; detect by which dim is
+        # smaller.
+        out = raw[0]
+        if out.shape[0] < out.shape[1]:
+            out = out.T  # → (A, 4+nc)
+        if out.shape[1] < 5:
+            return _OnnxResult()  # malformed output
+
+        boxes_pix = out[:, :4]            # (A, 4) cx,cy,w,h in model pixels
+        class_probs = out[:, 4:]          # (A, nc)
+        cls_ids = np.argmax(class_probs, axis=1).astype(np.int64)
+        confs = class_probs[np.arange(class_probs.shape[0]), cls_ids]
+
+        # Confidence + class filter early — drops thousands of anchors before
+        # the NMS step, so NMS doesn't even see them.
+        keep = confs >= conf_thr
+        if cls_filter is not None:
+            keep &= np.isin(cls_ids, list(cls_filter))
+        boxes_pix = boxes_pix[keep]
+        cls_ids = cls_ids[keep]
+        confs = confs[keep]
+        if boxes_pix.shape[0] == 0:
+            return _OnnxResult()
+
+        # cv2.dnn.NMSBoxes expects (x, y, w, h) in pixels — same coordinate
+        # space as the model. Class-aware NMS by offsetting per-class.
+        offsets = cls_ids.astype(np.float32) * 4096.0
+        nms_in = boxes_pix.copy()
+        nms_in[:, 0] += offsets
+        nms_xywh = np.column_stack([
+            nms_in[:, 0] - nms_in[:, 2] / 2.0,
+            nms_in[:, 1] - nms_in[:, 3] / 2.0,
+            nms_in[:, 2], nms_in[:, 3],
+        ])
+        idx = cv2.dnn.NMSBoxes(
+            nms_xywh.tolist(), confs.astype(np.float32).tolist(),
+            float(conf_thr), float(iou_thr))
+        if len(idx) == 0:
+            return _OnnxResult()
+        idx = np.asarray(idx).reshape(-1)
+        idx = idx[np.argsort(-confs[idx])][:max_det]
+
+        # De-letterbox: subtract pad, divide by scale, normalize to original.
+        h0, w0 = orig_hw
+        cx = (boxes_pix[idx, 0] - pad_left) / scale
+        cy = (boxes_pix[idx, 1] - pad_top) / scale
+        bw = boxes_pix[idx, 2] / scale
+        bh = boxes_pix[idx, 3] / scale
+        cxn = np.clip(cx / w0, 0.0, 1.0)
+        cyn = np.clip(cy / h0, 0.0, 1.0)
+        wn = np.clip(bw / w0, 0.0, 1.0)
+        hn = np.clip(bh / h0, 0.0, 1.0)
+
+        result = _OnnxResult()
+        for i, k in enumerate(idx):
+            result.boxes.append(_OnnxBox(
+                cls=np.array([cls_ids[k]], dtype=np.int64),
+                conf=np.array([confs[k]], dtype=np.float32),
+                xywhn=np.array([[cxn[i], cyn[i], wn[i], hn[i]]],
+                                dtype=np.float32),
+            ))
+        return result
+
+    # ======================================
+    # -------- 7. SOURCE NORMALIZATION --------
+    # ======================================
+
+    @staticmethod
+    def _normalize_source(
+        source: Union[ImageOrPath, Sequence[ImageOrPath]],
+    ) -> Sequence[ImageOrPath]:
+        """Accept a single path/array or a list, return a sequence."""
+        if isinstance(source, (str, Path, np.ndarray)):
+            return [source]
+        return list(source)
+
+    @staticmethod
+    def _read_image(src: ImageOrPath) -> np.ndarray | None:
+        if isinstance(src, np.ndarray):
+            return src
+        img = cv2.imread(str(src))
+        return img  # cv2 returns None for unreadable paths

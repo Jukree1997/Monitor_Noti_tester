@@ -1,12 +1,90 @@
+# ======================================
+# -------- 0. IMPORTS --------
+# ======================================
+
 from __future__ import annotations
 import time
 import numpy as np
+import supervision as sv
 from PySide6.QtCore import QObject, QThread, Signal, Slot
-from core.video_source import VideoSource
+from trackers import ByteTrackTracker
 
+from core.video_source import VideoSource
+from core.onnx_runtime import OnnxYoloDetector
+
+
+# ======================================
+# -------- 1. RESULT ADAPTERS --------
+# ======================================
+# The runner reads tracking output as `result.boxes.xyxy.cpu().numpy()` —
+# the ultralytics shape. Phase 1 of ultralytics-replacement.md splits the
+# detection (OnnxYoloDetector) from tracking (ByteTrackTracker), so we
+# rebuild a tiny duck-typed surface here so runner.py keeps working
+# unchanged.
+
+class _ArrayProxy:
+    """Mimics `torch.Tensor.cpu().numpy()` on a numpy array."""
+
+    def __init__(self, arr: np.ndarray):
+        self._arr = arr
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self._arr
+
+
+class _BoxesView:
+    """Bulk-array view over the detections kept by the runner: .xyxy, .cls,
+    .id, .conf as torch-tensor-shaped accessors. `.id` is None when no
+    track survived (mirrors ultralytics' "no tracker" behavior)."""
+
+    def __init__(
+        self,
+        xyxy: np.ndarray,
+        cls: np.ndarray,
+        ids: np.ndarray | None,
+        conf: np.ndarray,
+    ):
+        self.xyxy = _ArrayProxy(xyxy)
+        self.cls = _ArrayProxy(cls)
+        self.id = _ArrayProxy(ids) if ids is not None else None
+        self.conf = _ArrayProxy(conf)
+
+    def __len__(self):
+        return self.xyxy._arr.shape[0]
+
+
+class _TrackResult:
+    """Per-frame detection + tracking output, shaped like an ultralytics
+    Results object so runner._on_frame_ready needs no changes. An empty
+    result has `.boxes` with len() == 0, never None."""
+
+    def __init__(
+        self,
+        xyxy: np.ndarray | None = None,
+        cls: np.ndarray | None = None,
+        ids: np.ndarray | None = None,
+        conf: np.ndarray | None = None,
+    ):
+        if xyxy is None or len(xyxy) == 0:
+            self.boxes = _BoxesView(
+                np.zeros((0, 4), dtype=np.float32),
+                np.zeros(0, dtype=int),
+                None,
+                np.zeros(0, dtype=np.float32),
+            )
+        else:
+            self.boxes = _BoxesView(xyxy, cls, ids, conf)
+
+
+# ======================================
+# -------- 2. DETECTION WORKER --------
+# ======================================
 
 class DetectionWorker(QObject):
-    """Runs YOLO inference + ByteTrack tracking loop on a background thread."""
+    """Runs ONNX inference + ByteTrack tracking loop on a background thread."""
 
     frame_ready = Signal(np.ndarray, object, float, float)  # frame, result, inference_ms, frame_time
     error = Signal(str)
@@ -15,7 +93,8 @@ class DetectionWorker(QObject):
     def __init__(self):
         super().__init__()
         self._running = False
-        self._model = None
+        self._model: OnnxYoloDetector | None = None
+        self._tracker: ByteTrackTracker | None = None
         self._source: VideoSource | None = None
         self._conf = 0.40
         self._iou = 0.45
@@ -32,8 +111,11 @@ class DetectionWorker(QObject):
         self._pace_anchor_frame: int = 0
         self._frames_read: int = 0
 
-    def set_model(self, model):
+    def set_model(self, model: OnnxYoloDetector):
         self._model = model
+
+    def set_tracker(self, tracker: ByteTrackTracker):
+        self._tracker = tracker
 
     def set_source(self, source: VideoSource):
         self._source = source
@@ -47,7 +129,7 @@ class DetectionWorker(QObject):
             self._imgsz = imgsz
 
     def set_classes(self, classes: list[int] | None):
-        """Restrict YOLO to these class IDs. None (or empty) = no filter."""
+        """Restrict detection to these class IDs. None (or empty) = no filter."""
         self._classes = classes if classes else None
 
     def set_playback_mode(self, mode: str):
@@ -69,7 +151,7 @@ class DetectionWorker(QObject):
         self._pace_anchor_frame = 0
         self._frames_read = 0
         while self._running:
-            if self._source is None or self._model is None:
+            if self._source is None or self._model is None or self._tracker is None:
                 break
 
             ret, frame = self._source.read()
@@ -107,20 +189,18 @@ class DetectionWorker(QObject):
 
             try:
                 t0 = time.perf_counter()
-                track_kwargs = dict(
-                    imgsz=self._imgsz,
-                    conf=self._conf,
-                    iou=self._iou,
-                    max_det=10000,
-                    verbose=False,
-                    tracker="bytetrack.yaml",
-                    persist=True,
+                # Detect → track in two explicit steps. Was a single
+                # ultralytics .track() call before Phase 1 split it.
+                det_results = self._model.predict(
+                    frame,
+                    conf=self._conf, iou=self._iou,
+                    classes=self._classes,
+                    max_det=10000, imgsz=self._imgsz,
+                    stream=False, verbose=False,
                 )
-                if self._classes is not None:
-                    track_kwargs["classes"] = self._classes
-                results = self._model.track(frame, **track_kwargs)
+                det_result = det_results[0] if det_results else None
+                result = self._track(frame, det_result)
                 dt = (time.perf_counter() - t0) * 1000  # ms
-                result = results[0] if results else None
                 self.frame_ready.emit(frame, result, dt, frame_time)
             except Exception as e:
                 self.error.emit(str(e))
@@ -128,17 +208,61 @@ class DetectionWorker(QObject):
         self._running = False
         self.finished.emit()
 
+    def _track(self, frame: np.ndarray, det_result) -> _TrackResult:
+        """Feed the per-frame detections into ByteTrack and return the
+        tracker's confirmed-track result. Detections that ByteTrack hasn't
+        confirmed yet (tracker_id == -1) are dropped — the runner keys
+        every state map on the obj_id, and -1 would collide across frames."""
+        if det_result is None or not det_result.boxes:
+            tracked = self._tracker.update(sv.Detections.empty())
+        else:
+            h, w = frame.shape[:2]
+            xywhn = np.array([b.xywhn[0] for b in det_result.boxes],
+                             dtype=np.float32)
+            cls_arr = np.array([int(b.cls[0]) for b in det_result.boxes],
+                               dtype=int)
+            conf_arr = np.array([float(b.conf[0]) for b in det_result.boxes],
+                                dtype=np.float32)
+            cx = xywhn[:, 0] * w
+            cy = xywhn[:, 1] * h
+            bw = xywhn[:, 2] * w
+            bh = xywhn[:, 3] * h
+            xyxy_arr = np.stack([cx - bw / 2, cy - bh / 2,
+                                 cx + bw / 2, cy + bh / 2], axis=1)
+            dets = sv.Detections(
+                xyxy=xyxy_arr, confidence=conf_arr, class_id=cls_arr)
+            tracked = self._tracker.update(dets)
+
+        if len(tracked) == 0:
+            return _TrackResult()
+        valid = tracked.tracker_id != -1
+        if not valid.any():
+            return _TrackResult()
+        return _TrackResult(
+            xyxy=tracked.xyxy[valid],
+            cls=tracked.class_id[valid],
+            ids=tracked.tracker_id[valid].astype(int),
+            conf=(tracked.confidence[valid]
+                  if tracked.confidence is not None
+                  else np.zeros(int(valid.sum()), dtype=np.float32)),
+        )
+
     def stop(self):
         self._running = False
 
 
+# ======================================
+# -------- 3. DETECTION ENGINE --------
+# ======================================
+
 class DetectionEngine:
-    """Manages the detection worker thread and model loading."""
+    """Manages the detection worker thread, model, and tracker lifecycle."""
 
     def __init__(self):
         self._thread: QThread | None = None
         self._worker: DetectionWorker | None = None
-        self._model = None
+        self._model: OnnxYoloDetector | None = None
+        self._tracker: ByteTrackTracker | None = None
         self._model_names: dict[int, str] = {}
         self._device = "cpu"
         # Sticky default so a mode chosen before start() carries over to
@@ -158,36 +282,33 @@ class DetectionEngine:
         return self._device
 
     def load_model(self, path: str) -> str:
-        """Load YOLO model. Returns device info string."""
-        from ultralytics import YOLO
-        import torch
-
-        self._model = YOLO(path)
-
-        # Auto-detect CUDA
-        if torch.cuda.is_available():
+        """Load the ONNX detector. Returns a device-name string for the UI."""
+        self._model = OnnxYoloDetector(path)
+        active = self._model._session.get_providers()[0]
+        if active == "CUDAExecutionProvider":
             self._device = "cuda"
-            device_name = torch.cuda.get_device_name(0)
+            try:
+                import torch
+                device_name = torch.cuda.get_device_name(0)
+            except Exception:
+                device_name = "CUDA"
         else:
             self._device = "cpu"
             device_name = "CPU"
 
-        # Warm-up inference
+        # Warm-up inference so the first real frame doesn't pay session
+        # graph-compile latency.
         dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-        self._model(dummy, imgsz=640, verbose=False, device=self._device)
+        self._model(dummy, imgsz=640, verbose=False)
 
         self._model_names = self._model.names or {}
         return device_name
 
     def reset_tracker(self):
-        """Reset ByteTrack state for a fresh tracking session."""
-        if self._model and hasattr(self._model, "predictor") and self._model.predictor:
-            if hasattr(self._model.predictor, "trackers"):
-                for t in self._model.predictor.trackers:
-                    t.reset()
-            else:
-                # Predictor exists from warm-up but has no trackers yet — clear it
-                self._model.predictor = None
+        """Recreate the ByteTracker so the next session starts with no
+        tracks. ByteTrackTracker has a .reset() method too, but recreating
+        is simpler and avoids inheriting any obscure state from prior runs."""
+        self._tracker = ByteTrackTracker()
 
     def start(self, source: VideoSource, conf: float, iou: float, imgsz: int,
               on_frame, on_error, on_finished,
@@ -201,6 +322,7 @@ class DetectionEngine:
 
         self._worker = DetectionWorker()
         self._worker.set_model(self._model)
+        self._worker.set_tracker(self._tracker)
         self._worker.set_source(source)
         self._worker.set_params(conf=conf, iou=iou, imgsz=imgsz)
         self._worker.set_classes(classes)
