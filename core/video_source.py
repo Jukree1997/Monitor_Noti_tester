@@ -98,13 +98,34 @@ class VideoSource:
         return self._cap is not None and self._cap.isOpened()
 
     @staticmethod
-    def detect_usb_cameras(max_index: int = 5) -> list[int]:
-        """Scan for available USB camera indices."""
+    def detect_usb_cameras(max_index: int = 10) -> list[int]:
+        """Scan for available USB camera indices.
+
+        On Linux, restrict to indices that have a `/dev/videoN` device
+        AND are real capture devices — `cv2.CAP_ANY` falls through every
+        backend (V4L2/FFMPEG/GStreamer) for each missing index and
+        spams the terminal with warnings."""
         available = []
-        backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_ANY
-        for i in range(max_index):
+        system = platform.system()
+        if system == "Linux":
+            import os
+            backend = cv2.CAP_V4L2
+            candidate_indices = [
+                i for i in range(max_index)
+                if os.path.exists(f"/dev/video{i}")
+            ]
+        elif system == "Windows":
+            backend = cv2.CAP_DSHOW
+            candidate_indices = list(range(max_index))
+        else:
+            backend = cv2.CAP_ANY
+            candidate_indices = list(range(max_index))
+
+        for i in candidate_indices:
             cap = cv2.VideoCapture(i, backend)
             if cap.isOpened():
-                available.append(i)
+                ret, _ = cap.read()
+                if ret:
+                    available.append(i)
                 cap.release()
         return available
