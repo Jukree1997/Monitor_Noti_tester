@@ -15,7 +15,7 @@ import os
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QFileDialog, QMessageBox,
-    QScrollArea, QGridLayout, QStackedWidget,
+    QScrollArea, QGridLayout, QStackedWidget, QComboBox,
 )
 from core.fleet_manager import (
     FleetWorkerManager,
@@ -100,6 +100,13 @@ class FleetTab(QWidget):
         page_lay.setContentsMargins(5, 5, 5, 5)
         page_lay.setSpacing(5)
 
+        # Left column: grid scroll on top, playback-speed bar at the bottom.
+        # Mirrors the Single Project tab's layout convention so the dropdown
+        # lives in the same visual spot across both tabs.
+        grid_col = QVBoxLayout()
+        grid_col.setContentsMargins(0, 0, 0, 0)
+        grid_col.setSpacing(4)
+
         self._grid_scroll = QScrollArea()
         self._grid_scroll.setWidgetResizable(True)
         self._grid_scroll.setStyleSheet("QScrollArea { border: none; }")
@@ -110,7 +117,27 @@ class FleetTab(QWidget):
         self._grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop |
                                         Qt.AlignmentFlag.AlignLeft)
         self._grid_scroll.setWidget(self._grid_container)
-        page_lay.addWidget(self._grid_scroll, 1)
+        grid_col.addWidget(self._grid_scroll, 1)
+
+        # Bottom playback control: applies to all cameras in this fleet.
+        # No-op for live sources (RTSP / USB) — they're camera-paced.
+        speed_bar = QHBoxLayout()
+        speed_bar.setContentsMargins(2, 0, 2, 0)
+        speed_bar.addWidget(QLabel("Playback:"))
+        self._speed_combo = QComboBox()
+        self._speed_combo.addItem("Normal", "normal")
+        self._speed_combo.addItem("Process speed", "process")
+        self._speed_combo.setCurrentIndex(0)
+        self._speed_combo.setToolTip(
+            "Applies to every camera in this fleet whose source is a video "
+            "file. Live sources (RTSP / USB) ignore this — the camera "
+            "dictates the pace.")
+        self._speed_combo.currentIndexChanged.connect(self._on_speed_changed)
+        speed_bar.addWidget(self._speed_combo)
+        speed_bar.addStretch(1)
+        grid_col.addLayout(speed_bar)
+
+        page_lay.addLayout(grid_col, 1)
 
         self._sidebar = FleetSidebar(self._hardware)
         page_lay.addWidget(self._sidebar)
@@ -477,6 +504,12 @@ class FleetTab(QWidget):
             if state in (S_SPAWNING, S_RUNNING):
                 self._manager.set_overrides(
                     cam_id, {"display": self._display_opts})
+
+    @Slot(int)
+    def _on_speed_changed(self, _index: int):
+        mode = self._speed_combo.currentData()
+        if mode:
+            self._manager.set_playback_mode_all(mode)
 
     @Slot(str)
     def _on_settings_clicked(self, cam_id: str):

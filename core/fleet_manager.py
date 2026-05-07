@@ -18,7 +18,7 @@ from core.worker_process import (
     worker_main,
     MSG_STARTED, MSG_EVENT, MSG_NOTI, MSG_STATUS,
     MSG_THUMBNAIL, MSG_LIVE, MSG_ERROR, MSG_FINISHED,
-    CMD_STOP, CMD_SET_STREAMING, CMD_SET_OVERRIDES,
+    CMD_STOP, CMD_SET_STREAMING, CMD_SET_OVERRIDES, CMD_SET_PLAYBACK,
 )
 
 
@@ -68,6 +68,10 @@ class FleetWorkerManager(QObject):
             pass
 
         self._workers: dict[str, _CameraWorker] = {}
+        # Current global playback mode for the fleet (no persistence — resets
+        # to "normal" each launch). Dropdown in Fleet tab updates this; new
+        # cameras spawned later inherit it via start_camera.
+        self._playback_mode: str = "normal"
         self._poll = QTimer(self)
         self._poll.setInterval(50)  # 20 Hz
         self._poll.timeout.connect(self._drain_outbound)
@@ -112,6 +116,16 @@ class FleetWorkerManager(QObject):
         )
         worker.state = S_SPAWNING
         worker.process.start()
+        # Inherit the current fleet-wide playback mode. The default in the
+        # worker's engine is "normal", so we only need to push when set to
+        # "process" — but pushing always is harmless and keeps the flow
+        # simple if defaults ever change.
+        if self._playback_mode != "normal":
+            try:
+                worker.in_queue.put_nowait(
+                    (CMD_SET_PLAYBACK, {"mode": self._playback_mode}))
+            except Exception:
+                pass
 
     def stop_camera(self, camera_id: str):
         worker = self._workers.get(camera_id)
@@ -142,6 +156,21 @@ class FleetWorkerManager(QObject):
             worker.in_queue.put_nowait((CMD_SET_OVERRIDES, dict(overrides)))
         except Exception:
             pass
+
+    def set_playback_mode_all(self, mode: str):
+        """Broadcast a playback-mode change to every running worker. Live
+        sources (RTSP/USB) ignore the mode in DetectionWorker; only file
+        sources respect it. Safe to call regardless of worker state."""
+        if mode not in ("normal", "process"):
+            return
+        self._playback_mode = mode
+        for worker in self._workers.values():
+            if worker.in_queue is None:
+                continue
+            try:
+                worker.in_queue.put_nowait((CMD_SET_PLAYBACK, {"mode": mode}))
+            except Exception:
+                pass
 
     def list_cameras(self) -> list[dict]:
         return [{"id": w.camera_id, "project_path": w.project_path,

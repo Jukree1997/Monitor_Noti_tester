@@ -26,6 +26,7 @@ MSG_FINISHED  = "finished"       # payload: {"reason": str}
 CMD_STOP          = "stop"
 CMD_SET_STREAMING = "set_streaming"   # payload: {"enabled": bool}
 CMD_SET_OVERRIDES = "set_overrides"   # payload: dict for runner.set_runtime_overrides
+CMD_SET_PLAYBACK  = "set_playback"    # payload: {"mode": "normal"|"process"} — no-op for live sources
 
 
 def worker_main(project_path: str, in_queue, out_queue,
@@ -190,6 +191,9 @@ def worker_main(project_path: str, in_queue, out_queue,
                     state["streaming"] = bool(payload.get("enabled", False))
                 elif kind == CMD_SET_OVERRIDES:
                     runner.set_runtime_overrides(payload)
+                elif kind == CMD_SET_PLAYBACK:
+                    mode = payload.get("mode", "normal")
+                    engine.set_playback_mode(mode)
         except queue_mod.Empty:
             pass
 
