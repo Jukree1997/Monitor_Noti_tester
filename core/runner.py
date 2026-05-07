@@ -716,29 +716,50 @@ class PipelineRunner(QObject):
             return f"[{proj_name}]\n{body}"
         return body
 
+    def _source_to_frame_scale(self, frame: np.ndarray) -> tuple[float, float]:
+        """Compute (sx, sy) to map zone/line/box coords from the project's
+        source_resolution onto whatever-sized `frame` we got. Returns (1.0,
+        1.0) when source_resolution is unset or matches the frame, so noti
+        thumbnails (full-res) and tests are unaffected."""
+        h, w = frame.shape[:2]
+        sw, sh = w, h
+        sr = getattr(self._monitor, "source_resolution", None)
+        if sr and len(sr) == 2 and sr[0] and sr[1]:
+            sw, sh = int(sr[0]), int(sr[1])
+        return (w / sw if sw else 1.0, h / sh if sh else 1.0)
+
     def _draw_zones_and_lines(self, frame: np.ndarray) -> None:
-        """In-place: shade zones, outline polygons, draw lines + labels."""
+        """In-place: shade zones, outline polygons, draw lines + labels.
+        Zone/line points are in source-resolution coords; scale to the
+        actual frame size so the fleet's downscaled live-overlay frames
+        line up correctly."""
+        sx, sy = self._source_to_frame_scale(frame)
+
+        def _scale(pt):
+            return (int(pt[0] * sx), int(pt[1] * sy))
+
         for zone in self._monitor.zones:
             if not zone.enabled:
                 continue
-            pts = np.array(zone.points, dtype=np.int32)
+            pts = np.array([_scale(p) for p in zone.points], dtype=np.int32)
             color = self._hex_to_bgr(zone.color)
             overlay = frame.copy()
             cv2.fillPoly(overlay, [pts], color)
             cv2.addWeighted(overlay, 0.2, frame, 0.8, 0, frame)
             cv2.polylines(frame, [pts], True, color, 2)
             if len(zone.points) > 0:
+                p0 = _scale(zone.points[0])
                 cv2.putText(frame, zone.name,
-                            (zone.points[0][0] + 5, zone.points[0][1] - 5),
+                            (p0[0] + 5, p0[1] - 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         for line in self._monitor.lines:
             if not line.enabled:
                 continue
             color = self._hex_to_bgr(line.color)
-            cv2.line(frame, tuple(line.start), tuple(line.end), color, 2)
-            mx = (line.start[0] + line.end[0]) // 2
-            my = (line.start[1] + line.end[1]) // 2
+            cv2.line(frame, _scale(line.start), _scale(line.end), color, 2)
+            mx = int((line.start[0] + line.end[0]) / 2 * sx)
+            my = int((line.start[1] + line.end[1]) / 2 * sy)
             cv2.putText(frame, line.name, (mx + 5, my - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
@@ -764,9 +785,12 @@ class PipelineRunner(QObject):
         mode = self._display_opts.get("mode", "box")
         show_labels = self._display_opts.get("show_labels", True)
         dot_radius = 6
+        # Detection xyxy is also in source coords — scale to frame size.
+        sx, sy = self._source_to_frame_scale(out)
 
         for i, det in enumerate(detections):
-            x1, y1, x2, y2 = int(det[0]), int(det[1]), int(det[2]), int(det[3])
+            x1 = int(det[0] * sx); y1 = int(det[1] * sy)
+            x2 = int(det[2] * sx); y2 = int(det[3] * sy)
             cls_name = (det[5] if len(det) >= 6
                         else str(det[4]) if len(det) >= 5 else "?")
             color_hex = box_colors[i] if i < len(box_colors) else "#FFFFFF"
