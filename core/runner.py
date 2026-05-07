@@ -27,13 +27,6 @@ from models.config_schema import ProjectConfig, MonitorConfig, Event
 # don't reset when the YOLO/ByteTrack track ID resumes on re-detection.
 OBJECT_GRACE_SECONDS = 2.0
 
-# Maximum long-edge size of the frame sent to the GUI's video widget. The
-# detector ran on the original-resolution frame so detection quality is
-# unchanged; only the rendered preview is shrunk. self._last_frame stays
-# full-resolution so notification thumbnails / S3 uploads keep their
-# quality. Tuned for 1280 because typical desktop preview widgets are
-# ≤1280×720 — anything larger is just wasted pixel work.
-DISPLAY_LONG_EDGE_PX = 1280
 
 
 class _NotificationSignals(QObject):
@@ -420,31 +413,11 @@ class PipelineRunner(QObject):
         if self._is_first_frame:
             self._is_first_frame = False
 
-        # GUI rendering optimization: cap the displayed frame at
-        # DISPLAY_LONG_EDGE_PX on the long edge. cv2.cvtColor + QImage.copy
-        # at WQHD (2560×1440) was eating ~80 ms/frame in the GUI thread —
-        # fine for headless throughput but a hard cap on visible FPS at
-        # high source resolutions. Detection already ran on `frame`, so
-        # quality is unaffected; we just send the renderer less data.
-        # Box xyxy coords in `result` are in full-frame pixel space, so
-        # they get scaled to match `display_frame`.
-        display_frame = frame
-        long_edge = max(frame.shape[:2])
-        if long_edge > DISPLAY_LONG_EDGE_PX:
-            s = DISPLAY_LONG_EDGE_PX / long_edge
-            new_w = int(round(frame.shape[1] * s))
-            new_h = int(round(frame.shape[0] * s))
-            display_frame = cv2.resize(
-                frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
-            if (result is not None and result.boxes is not None
-                    and len(result.boxes) > 0):
-                result.boxes.xyxy._arr = result.boxes.xyxy._arr * s
-
         # Hand the rendered ingredients to the UI; UI decides whether to
         # actually draw (e.g. respects "Show live" toggle). The Fleet worker
         # also uses these to render an overlay onto live frames before
         # JPEG-encoding for full-screen streaming.
-        self.frame_ready.emit(display_frame, result, {
+        self.frame_ready.emit(frame, result, {
             "events": all_events,
             "box_colors": box_colors,
             "det_labels": det_labels,
