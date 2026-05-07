@@ -63,10 +63,13 @@ import onnxruntime as ort  # noqa: E402  — must come after cuDNN preload
 # ======================================
 
 # These mimic the slice of the `ultralytics.engine.results.Results` API that
-# auto_labeler / smart_relabeler actually touch — `.boxes` iterable; each box
-# supports `.cls[0]`, `.conf[0]`, `.xywhn[0].tolist()`. Keeping the same
-# duck-typed surface means existing call-site code (`for box in r.boxes:
-# coco_cls = int(box.cls[0])`) does not change.
+# downstream code actually touches. Two distinct usage styles in this
+# codebase:
+#   - per-box iteration (auto_labeler / smart_relabeler):
+#         for box in r.boxes: int(box.cls[0]); box.xywhn[0].tolist()
+#   - bulk torch-tensor-shaped access (Live_Detection_Tester app.py):
+#         r.boxes.cls.cpu().numpy().astype(int); r.boxes.xyxy.cpu().numpy()
+# `_Boxes` supports both via iter()/len() AND .cls/.conf/.xyxy/.xywhn props.
 
 @dataclass
 class _OnnxBox:
@@ -75,9 +78,67 @@ class _OnnxBox:
     xywhn: np.ndarray  # shape (1,4) float32 normalized cx, cy, w, h
 
 
+class _ArrayProxy:
+    """Mimics `torch.Tensor.cpu().numpy()` on a plain numpy array so call
+    sites that wrote against ultralytics' torch-backed result API don't
+    need to branch on backend."""
+
+    def __init__(self, arr: np.ndarray):
+        self._arr = arr
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self._arr
+
+
+class _Boxes:
+    """Aggregator that satisfies both APIs at once:
+       - iter / len / index → individual `_OnnxBox` instances
+       - .xyxy / .cls / .conf / .xywhn → `_ArrayProxy` (bulk numpy with
+         `.cpu().numpy()`).
+       - .id is always None — tracker IDs are added downstream by the
+         tracker layer (e.g. Monitor_Noti_tester's `_TrackResult`)."""
+
+    def __init__(
+        self,
+        boxes_list: list[_OnnxBox],
+        xyxy: np.ndarray,
+        cls: np.ndarray,
+        conf: np.ndarray,
+        xywhn: np.ndarray,
+    ):
+        self._boxes = boxes_list
+        self.xyxy = _ArrayProxy(xyxy)
+        self.cls = _ArrayProxy(cls)
+        self.conf = _ArrayProxy(conf)
+        self.xywhn = _ArrayProxy(xywhn)
+        self.id = None
+
+    def __iter__(self):
+        return iter(self._boxes)
+
+    def __len__(self):
+        return len(self._boxes)
+
+    def __getitem__(self, i):
+        return self._boxes[i]
+
+
+def _empty_boxes() -> _Boxes:
+    return _Boxes(
+        [],
+        xyxy=np.zeros((0, 4), dtype=np.float32),
+        cls=np.zeros(0, dtype=np.int64),
+        conf=np.zeros(0, dtype=np.float32),
+        xywhn=np.zeros((0, 4), dtype=np.float32),
+    )
+
+
 @dataclass
 class _OnnxResult:
-    boxes: list[_OnnxBox] = field(default_factory=list)
+    boxes: _Boxes = field(default_factory=_empty_boxes)
     names: dict[int, str] = field(default_factory=dict)  # class id → name
     obb: None = None  # oriented bounding boxes — always None for axis-aligned models
 
@@ -294,15 +355,30 @@ class OnnxYoloDetector:
         wn = np.clip(bw / w0, 0.0, 1.0)
         hn = np.clip(bh / h0, 0.0, 1.0)
 
-        result = _OnnxResult()
+        # Pixel-space xyxy for the bulk-array surface (used by call sites
+        # that work in pixel coords, e.g. Live_Detection_Tester drawing).
+        x1_pix = cx - bw / 2.0
+        y1_pix = cy - bh / 2.0
+        x2_pix = cx + bw / 2.0
+        y2_pix = cy + bh / 2.0
+
+        # Build per-box list (for `for box in r.boxes:` iteration).
+        boxes_list: list[_OnnxBox] = []
         for i, k in enumerate(idx):
-            result.boxes.append(_OnnxBox(
+            boxes_list.append(_OnnxBox(
                 cls=np.array([cls_ids[k]], dtype=np.int64),
                 conf=np.array([confs[k]], dtype=np.float32),
                 xywhn=np.array([[cxn[i], cyn[i], wn[i], hn[i]]],
                                 dtype=np.float32),
             ))
-        return result
+
+        return _OnnxResult(boxes=_Boxes(
+            boxes_list=boxes_list,
+            xyxy=np.stack([x1_pix, y1_pix, x2_pix, y2_pix], axis=1).astype(np.float32),
+            cls=cls_ids[idx].astype(np.int64),
+            conf=confs[idx].astype(np.float32),
+            xywhn=np.stack([cxn, cyn, wn, hn], axis=1).astype(np.float32),
+        ))
 
     # ======================================
     # -------- 7. SOURCE NORMALIZATION --------
