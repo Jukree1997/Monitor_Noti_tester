@@ -311,7 +311,17 @@ class OnnxYoloDetector:
             return _OnnxResult()  # malformed output
 
         boxes_pix = out[:, :4]            # (A, 4) cx,cy,w,h in model pixels
-        class_probs = out[:, 4:]          # (A, nc)
+        # Class channels start at index 4. Some exports keep extra trailing
+        # channels (e.g., a 2-class architecture later retrained for 1
+        # class — the head's second slot stays in the graph but holds raw
+        # logits, not probabilities). Trust the metadata's `names` dict
+        # over the raw output width when names is present.
+        nc_total = out.shape[1] - 4
+        if self._names and len(self._names) <= nc_total:
+            nc = len(self._names)
+        else:
+            nc = nc_total
+        class_probs = out[:, 4:4 + nc]    # (A, nc) — real probability channels only
         cls_ids = np.argmax(class_probs, axis=1).astype(np.int64)
         confs = class_probs[np.arange(class_probs.shape[0]), cls_ids]
 
