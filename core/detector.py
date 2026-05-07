@@ -198,9 +198,19 @@ class DetectionWorker(QObject):
                     max_det=10000, imgsz=self._imgsz,
                     stream=False, verbose=False,
                 )
+                t_predict = time.perf_counter()
                 det_result = det_results[0] if det_results else None
                 result = self._track(frame, det_result)
-                dt = (time.perf_counter() - t0) * 1000  # ms
+                t_track = time.perf_counter()
+                dt = (t_track - t0) * 1000  # ms
+                # DEBUG: per-step timing — every 30 frames so logs don't flood.
+                if self._frames_read % 30 == 0:
+                    pred_ms = (t_predict - t0) * 1000
+                    track_ms = (t_track - t_predict) * 1000
+                    print(f"[worker] frame {self._frames_read}: "
+                          f"predict={pred_ms:.1f}ms, track={track_ms:.1f}ms, "
+                          f"total dt={dt:.1f}ms",
+                          flush=True)
                 self.frame_ready.emit(frame, result, dt, frame_time)
             except Exception as e:
                 self.error.emit(str(e))
