@@ -43,12 +43,17 @@ class VideoWidget(QWidget):
         self._flash_regions: dict[str, float] = {}
         self._flash_duration = 1.0
 
-        # Display transform
+        # Display transform — `_source_w/h` is the project's
+        # source_resolution and the canonical coord system for boxes/zones;
+        # `_frame_w/h` is whatever pixel buffer we actually render (which
+        # may be downscaled for rendering speed).
         self._scale = 1.0
         self._offset_x = 0
         self._offset_y = 0
         self._frame_w = 0
         self._frame_h = 0
+        self._source_w = 0
+        self._source_h = 0
 
     def update_frame(self, frame: np.ndarray, result=None, config: MonitorConfig = None,
                      events: list = None, box_colors: list[str] = None,
@@ -94,11 +99,24 @@ class VideoWidget(QWidget):
     def _compute_transform(self):
         if self._frame_w == 0 or self._frame_h == 0:
             return
+        # Box/zone coords come in *source resolution* (what the project was
+        # configured against), not the displayed-frame size. Decoupling lets
+        # the runner downscale the displayed frame for cheaper rendering
+        # without breaking overlay alignment. Fall back to frame size when
+        # no config is loaded yet (preview mode).
+        if self._config is not None and len(self._config.source_resolution) == 2:
+            sw, sh = self._config.source_resolution
+            self._source_w = int(sw) if sw > 0 else self._frame_w
+            self._source_h = int(sh) if sh > 0 else self._frame_h
+        else:
+            self._source_w = self._frame_w
+            self._source_h = self._frame_h
+
         cw = self.width()
         ch = self.height()
-        self._scale = min(cw / self._frame_w, ch / self._frame_h)
-        disp_w = self._frame_w * self._scale
-        disp_h = self._frame_h * self._scale
+        self._scale = min(cw / self._source_w, ch / self._source_h)
+        disp_w = self._source_w * self._scale
+        disp_h = self._source_h * self._scale
         self._offset_x = (cw - disp_w) / 2
         self._offset_y = (ch - disp_h) / 2
 
@@ -123,9 +141,11 @@ class VideoWidget(QWidget):
 
         self._compute_transform()
 
-        # Draw frame
-        disp_w = self._frame_w * self._scale
-        disp_h = self._frame_h * self._scale
+        # Draw frame — stretch the qimage (which may be a downscaled buffer)
+        # into the source-coord-derived target rect, so overlays drawn at
+        # source coords land on the right pixels.
+        disp_w = self._source_w * self._scale
+        disp_h = self._source_h * self._scale
         target_rect = QRectF(self._offset_x, self._offset_y, disp_w, disp_h)
         painter.drawImage(target_rect, self._qimage)
 

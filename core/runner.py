@@ -27,6 +27,17 @@ from models.config_schema import ProjectConfig, MonitorConfig, Event
 # don't reset when the YOLO/ByteTrack track ID resumes on re-detection.
 OBJECT_GRACE_SECONDS = 2.0
 
+# Cap the long edge of the frame buffer sent to the GUI's video widget.
+# WQHD (2560×1440) sources were saturating the UI thread with cv2.cvtColor
+# + QImage.copy on every frame; that starved the worker QThread of CPU and
+# the worker's wall-clock-measured `dt` ballooned to ~100 ms even though
+# the actual GPU inference was 5 ms. Downscaling to 1280 long edge cuts
+# render work ~4× without affecting box/zone overlay alignment — the
+# video widget keys overlay transforms off MonitorConfig.source_resolution,
+# not the displayed buffer size, so source-coord boxes still land on the
+# right pixels. self._last_frame stays full-resolution for noti thumbnails.
+DISPLAY_LONG_EDGE_PX = 1280
+
 
 
 class _NotificationSignals(QObject):
@@ -413,11 +424,26 @@ class PipelineRunner(QObject):
         if self._is_first_frame:
             self._is_first_frame = False
 
+        # Downscale the frame buffer for the UI emit to keep the UI thread
+        # from saturating on cvtColor + QImage.copy at high source
+        # resolutions (which back-pressures the worker QThread). Box and
+        # zone coords stay in source resolution; the video widget keys its
+        # source→display transform off MonitorConfig.source_resolution, so
+        # alignment is preserved even when the displayed buffer is smaller.
+        display_frame = frame
+        long_edge = max(frame.shape[:2])
+        if long_edge > DISPLAY_LONG_EDGE_PX:
+            s = DISPLAY_LONG_EDGE_PX / long_edge
+            new_w = int(round(frame.shape[1] * s))
+            new_h = int(round(frame.shape[0] * s))
+            display_frame = cv2.resize(
+                frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
         # Hand the rendered ingredients to the UI; UI decides whether to
         # actually draw (e.g. respects "Show live" toggle). The Fleet worker
         # also uses these to render an overlay onto live frames before
         # JPEG-encoding for full-screen streaming.
-        self.frame_ready.emit(frame, result, {
+        self.frame_ready.emit(display_frame, result, {
             "events": all_events,
             "box_colors": box_colors,
             "det_labels": det_labels,
