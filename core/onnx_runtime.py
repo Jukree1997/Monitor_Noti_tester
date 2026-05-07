@@ -59,6 +59,56 @@ import onnxruntime as ort  # noqa: E402  — must come after cuDNN preload
 
 
 # ======================================
+# -------- 0b. CPU/GPU CONFLICT REPAIR --------
+# ======================================
+
+# ultralytics' ONNX export auto-installs `onnxruntime` (CPU) as a missing
+# requirement, even when `onnxruntime-gpu` is already present. Both share
+# the `onnxruntime` Python module, and pip resolves to whichever was
+# installed most recently — so the CPU package silently shadows GPU on
+# the next process launch, and the GUI mysteriously falls back to CPU
+# inference. This helper detects + fixes in-place so the user doesn't
+# have to remember the manual cleanup after every smart fine-tune.
+def fix_onnxruntime_gpu_conflict(verbose: bool = True) -> bool:
+    """Repair the onnxruntime / onnxruntime-gpu shadow conflict.
+
+    Returns True if a repair was performed. Safe to call anytime; if no
+    conflict exists, this is a fast no-op (one importlib.metadata scan).
+    """
+    try:
+        from importlib.metadata import distributions
+    except ImportError:
+        return False
+    installed = {d.metadata.get("Name", "").lower()
+                 for d in distributions()}
+    has_cpu = "onnxruntime" in installed
+    has_gpu = "onnxruntime-gpu" in installed
+    if not (has_cpu and has_gpu):
+        return False  # no conflict
+    if verbose:
+        print("[onnxruntime] CPU + GPU packages both installed — "
+              "repairing so CUDA stays active on next launch...")
+    import subprocess, sys
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "uninstall", "-y", "onnxruntime"],
+            check=False, capture_output=True, timeout=60)
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install",
+             "--force-reinstall", "--no-deps", "onnxruntime-gpu"],
+            check=False, capture_output=True, timeout=300)
+        if verbose:
+            print("[onnxruntime] repair complete — onnxruntime-gpu restored.")
+    except Exception as e:
+        if verbose:
+            print(f"[onnxruntime] auto-repair failed: {e}\n"
+                  f"  Run manually: pip uninstall onnxruntime -y && "
+                  f"pip install --force-reinstall --no-deps onnxruntime-gpu")
+        return False
+    return True
+
+
+# ======================================
 # -------- 1. RESULT WRAPPER TYPES --------
 # ======================================
 
@@ -168,6 +218,22 @@ class OnnxYoloDetector:
         self._input_name = self._session.get_inputs()[0].name
         self._imgsz = int(imgsz)
         self._names = self._extract_class_names()
+
+        # If we asked for CUDA but the session fell back to CPU, surface a
+        # loud warning so the user notices (silent CPU fallback was the
+        # cause of every "why is my detection slow" mystery so far). Also
+        # kick off a background repair so the *next* process launch picks
+        # up the real GPU package — can't fix the current process because
+        # `onnxruntime` is already imported.
+        active = self._session.get_providers()[0]
+        if active != "CUDAExecutionProvider":
+            print(f"[OnnxYoloDetector] WARNING: requested CUDA but active "
+                  f"provider is {active}. Inference will be CPU-bound. "
+                  f"Attempting environment repair for next launch...")
+            try:
+                fix_onnxruntime_gpu_conflict(verbose=True)
+            except Exception:
+                pass
 
     @property
     def names(self) -> dict[int, str]:
