@@ -201,12 +201,21 @@ ImageOrPath = Union[str, Path, np.ndarray]
 
 
 class OnnxYoloDetector:
-    """ONNX-Runtime-backed YOLO detector.
+    """ONNX-Runtime-backed object detector with auto-format dispatch.
 
-    Loads a YOLO ONNX file (exported with `dynamic=True, simplify=True` from
-    ultralytics, or any future RF-DETR-style export with the same I/O shape)
-    and runs inference via `onnxruntime-gpu`. Falls back to CPU automatically
-    if no CUDA provider is available.
+    Loads a detector ONNX file and dispatches to the right pre/post-process
+    based on the export format:
+      * **YOLO** (ultralytics, `dynamic=True, simplify=True`) — single output,
+        shape `(1, 4+nc, anchors)`. Letterbox preprocess, anchor-grid
+        postprocess + NMS.
+      * **RF-DETR** (`rfdetr.RFDETRMedium().export()`) — two outputs named
+        `dets` (shape `(1, 300, 4)`, cxcywh normalized) and `labels` (shape
+        `(1, 300, n+1)`, raw logits with a trailing background slot).
+        Square-resize + ImageNet-mean/std preprocess; sigmoid + topk + filter
+        postprocess (no NMS — DETR already deduplicates via Hungarian
+        matching during training).
+
+    Falls back to CPU automatically if no CUDA provider is available.
     """
 
     def __init__(self, model_path: ImageOrPath, imgsz: int = 640):
@@ -217,7 +226,22 @@ class OnnxYoloDetector:
         self._session = ort.InferenceSession(self._path, providers=providers)
         self._input_name = self._session.get_inputs()[0].name
         self._imgsz = int(imgsz)
+        self._format = self._detect_format()
         self._names = self._extract_class_names()
+        if self._format == "rfdetr":
+            # RF-DETR has a fixed input resolution baked into the export —
+            # use the model's actual input H/W so caller-provided imgsz is
+            # ignored on this path.
+            in_shape = self._session.get_inputs()[0].shape
+            self._rfdetr_size = (int(in_shape[2]), int(in_shape[3]))
+            # Derive num_classes_no_bg from the labels output shape (n+1
+            # logits per query — the last slot is the implicit background).
+            label_shape = next(
+                o.shape for o in self._session.get_outputs() if o.name == "labels"
+            )
+            self._rfdetr_n_logits = int(label_shape[2])
+            print(f"[OnnxDetector] format=rfdetr  input={self._rfdetr_size}  "
+                  f"logits={self._rfdetr_n_logits} (incl. bg)  names={self._names}")
 
         # If we asked for CUDA but the session fell back to CPU, surface a
         # loud warning so the user notices (silent CPU fallback was the
@@ -241,24 +265,56 @@ class OnnxYoloDetector:
         present, else empty (callers should use the int id as a label)."""
         return self._names
 
+    @property
+    def format(self) -> str:
+        """'yolo' or 'rfdetr' — selected at __init__ from ONNX I/O shape."""
+        return self._format
+
+    def _detect_format(self) -> str:
+        """Sniff the ONNX export style from output names + shapes.
+
+        RF-DETR exports two outputs named `dets` and `labels`. Anything else
+        (single output, ultralytics-style 4+nc anchors) is treated as YOLO."""
+        outputs = self._session.get_outputs()
+        out_names = {o.name for o in outputs}
+        if {"dets", "labels"}.issubset(out_names) and len(outputs) >= 2:
+            return "rfdetr"
+        return "yolo"
+
     def _extract_class_names(self) -> dict[int, str]:
-        """ultralytics' ONNX export writes the {0: "person", ...} dict into
-        the model's `metadata.names` custom map. Recover it here so result
-        consumers can do `result.names[cls_id]` like they did with YOLO."""
+        """Recover the {0: "person", ...} dict from the source the export
+        wrote it to:
+
+        * ultralytics writes `names` into ONNX `custom_metadata_map` as a
+          Python-repr string;
+        * `rfdetr.export()` does NOT embed names — look for a sidecar
+          `<model>.names.json` next to the .onnx (list or {"0": ...} dict).
+
+        Falls back to {} when nothing is found; callers should display int IDs."""
+        # 1. ONNX-embedded names (ultralytics path).
         try:
             meta = self._session.get_modelmeta().custom_metadata_map
             raw = meta.get("names")
-            if not raw:
-                return {}
-            # ultralytics serializes as a Python-repr-like string, e.g.
-            # "{0: 'person', 1: 'bicycle', ...}". `ast.literal_eval` parses
-            # that safely without exec.
-            import ast
-            parsed = ast.literal_eval(raw)
-            if isinstance(parsed, dict):
-                return {int(k): str(v) for k, v in parsed.items()}
+            if raw:
+                import ast
+                parsed = ast.literal_eval(raw)
+                if isinstance(parsed, dict):
+                    return {int(k): str(v) for k, v in parsed.items()}
         except (ValueError, SyntaxError, AttributeError):
             pass
+        # 2. Sidecar JSON (RF-DETR path; produced by Smart_Relabeler_V2's
+        # Phase 2 trainer alongside the ONNX export).
+        import json
+        sidecar = Path(self._path).with_suffix(".names.json")
+        if sidecar.is_file():
+            try:
+                data = json.loads(sidecar.read_text())
+                if isinstance(data, list):
+                    return {i: str(n) for i, n in enumerate(data)}
+                if isinstance(data, dict):
+                    return {int(k): str(v) for k, v in data.items()}
+            except (ValueError, OSError):
+                pass
         return {}
 
     # ======================================
@@ -319,11 +375,20 @@ class OnnxYoloDetector:
         cls_filter: set[int] | None, max_det: int, target_size: int,
     ) -> _OnnxResult:
         h0, w0 = img_bgr.shape[:2]
-        inp, scale, pad_top, pad_left = self._letterbox(img_bgr, target_size)
-        outputs = self._session.run(None, {self._input_name: inp})
-        result = self._postprocess(
-            outputs[0], (h0, w0), scale, pad_top, pad_left,
-            conf, iou, cls_filter, max_det)
+        if self._format == "rfdetr":
+            inp = self._preprocess_rfdetr(img_bgr)
+            outputs = self._session.run(None, {self._input_name: inp})
+            # rfdetr exports outputs in the order [dets, labels] (per
+            # rfdetr/detr.py:837 output_names = ["dets", "labels"]).
+            dets, labels = outputs[0], outputs[1]
+            result = self._postprocess_rfdetr(
+                dets, labels, (h0, w0), conf, cls_filter, max_det)
+        else:
+            inp, scale, pad_top, pad_left = self._letterbox(img_bgr, target_size)
+            outputs = self._session.run(None, {self._input_name: inp})
+            result = self._postprocess(
+                outputs[0], (h0, w0), scale, pad_top, pad_left,
+                conf, iou, cls_filter, max_det)
         result.names = self._names
         return result
 
@@ -453,6 +518,106 @@ class OnnxYoloDetector:
             xyxy=np.stack([x1_pix, y1_pix, x2_pix, y2_pix], axis=1).astype(np.float32),
             cls=cls_ids[idx].astype(np.int64),
             conf=confs[idx].astype(np.float32),
+            xywhn=np.stack([cxn, cyn, wn, hn], axis=1).astype(np.float32),
+        ))
+
+    # ======================================
+    # -------- 6b. RF-DETR PATH --------
+    # ======================================
+
+    # ImageNet-style normalization — the only preprocessing RF-DETR was
+    # trained with (no letterbox; square resize directly to model resolution).
+    _RFDETR_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 3, 1, 1)
+    _RFDETR_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 3, 1, 1)
+
+    def _preprocess_rfdetr(self, img_bgr: np.ndarray) -> np.ndarray:
+        """Resize-and-normalize an FHD frame to the RF-DETR input layout.
+
+        Returns NCHW float32 with ImageNet normalization. Scale is implicit
+        in the postprocess (boxes come back in normalized [0,1] coords and
+        get scaled by the original image size)."""
+        h, w = self._rfdetr_size
+        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        resized = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_LINEAR)
+        chw = np.transpose(resized.astype(np.float32) / 255.0, (2, 0, 1))[None]
+        return ((chw - self._RFDETR_MEAN) / self._RFDETR_STD).astype(np.float32)
+
+    def _postprocess_rfdetr(
+        self, dets: np.ndarray, labels: np.ndarray,
+        orig_hw: tuple[int, int], conf_thr: float,
+        cls_filter: set[int] | None, max_det: int,
+    ) -> _OnnxResult:
+        """Decode RF-DETR's (dets, labels) outputs into the same `_OnnxResult`
+        surface YOLO produces.
+
+        Mirrors `rfdetr.models.lwdetr.PostProcess.forward`:
+          1. sigmoid the logits
+          2. flatten + topk over (queries × classes)
+          3. recover query index + class index from the flat index
+          4. cxcywh → xyxy, scale to original image size
+          5. drop the implicit-background slot
+          6. apply user conf threshold + class filter
+        """
+        # Logits sigmoid → per-(query, class) probability. Background slot is
+        # the last class index (== self._rfdetr_n_logits - 1).
+        prob = 1.0 / (1.0 + np.exp(-labels[0]))  # (300, n_logits)
+        n_q, n_logits = prob.shape
+
+        # Top-k over the entire (query × class) score grid, k = num_queries.
+        flat = prob.reshape(-1)
+        if flat.size == 0:
+            return _OnnxResult()
+        k = min(n_q, max_det if max_det > 0 else n_q)
+        topk_idx = np.argpartition(-flat, k - 1)[:k]
+        topk_idx = topk_idx[np.argsort(-flat[topk_idx])]
+        scores = flat[topk_idx]
+        query_idx = topk_idx // n_logits
+        class_idx = topk_idx % n_logits
+
+        # Drop background slot AND apply conf threshold in one mask. Also
+        # apply caller's class filter if any.
+        bg_class = n_logits - 1
+        keep = (class_idx != bg_class) & (scores >= conf_thr)
+        if cls_filter is not None and len(cls_filter) > 0:
+            keep &= np.isin(class_idx, list(cls_filter))
+        if not keep.any():
+            return _OnnxResult()
+        scores = scores[keep]
+        query_idx = query_idx[keep]
+        cls_ids = class_idx[keep].astype(np.int64)
+
+        # Gather boxes (cxcywh, normalized) for the surviving queries, then
+        # convert to xyxy in pixel coords.
+        cxcywh = dets[0, query_idx]  # (K, 4) cxcywh in [0,1]
+        h0, w0 = orig_hw
+        cxn = cxcywh[:, 0]
+        cyn = cxcywh[:, 1]
+        wn = cxcywh[:, 2]
+        hn = cxcywh[:, 3]
+        cx = cxn * w0
+        cy = cyn * h0
+        bw = wn * w0
+        bh = hn * h0
+        x1 = cx - bw / 2.0
+        y1 = cy - bh / 2.0
+        x2 = cx + bw / 2.0
+        y2 = cy + bh / 2.0
+
+        # Build per-box list for ultralytics-style iteration.
+        boxes_list: list[_OnnxBox] = []
+        for i in range(len(scores)):
+            boxes_list.append(_OnnxBox(
+                cls=np.array([cls_ids[i]], dtype=np.int64),
+                conf=np.array([scores[i]], dtype=np.float32),
+                xywhn=np.array([[cxn[i], cyn[i], wn[i], hn[i]]],
+                                dtype=np.float32),
+            ))
+
+        return _OnnxResult(boxes=_Boxes(
+            boxes_list=boxes_list,
+            xyxy=np.stack([x1, y1, x2, y2], axis=1).astype(np.float32),
+            cls=cls_ids,
+            conf=scores.astype(np.float32),
             xywhn=np.stack([cxn, cyn, wn, hn], axis=1).astype(np.float32),
         ))
 
