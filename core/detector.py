@@ -304,11 +304,25 @@ class DetectionEngine:
         self._model_names = self._model.names or {}
         return device_name
 
+    # Tuned ByteTrack parameters for RF-DETR-class detectors. The defaults
+    # (lost_track_buffer=30, minimum_consecutive_frames=2) lose IDs too
+    # easily on small/far objects whose box edges jitter under transformer
+    # query competition — observed as inflated `lost_id_count` and false
+    # "fresh enter" events on the same physical object in distant zones.
+    # Doubling the lost-track buffer + raising the minimum-consecutive
+    # threshold to 3 closed most of that gap without harming near-camera
+    # tracking. YOLO behaviour is unchanged (its centroids don't jitter
+    # enough to benefit from the looser association window).
+    _TRACKER_KWARGS = dict(
+        lost_track_buffer=60,
+        minimum_consecutive_frames=3,
+    )
+
     def reset_tracker(self):
         """Recreate the ByteTracker so the next session starts with no
         tracks. ByteTrackTracker has a .reset() method too, but recreating
         is simpler and avoids inheriting any obscure state from prior runs."""
-        self._tracker = ByteTrackTracker()
+        self._tracker = ByteTrackTracker(**self._TRACKER_KWARGS)
 
     def start(self, source: VideoSource, conf: float, iou: float, imgsz: int,
               on_frame, on_error, on_finished,
