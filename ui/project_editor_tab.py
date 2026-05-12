@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from ui.editor_video_widget import EditorVideoWidget
 from ui.editor_sidebar import EditorSidebar
 from ui.zone_editor import ZoneLineEditor
+from core.detector import DetectionEngine
 from core.video_source import VideoSource
 from models.config_schema import (
     MonitorConfig, ProjectConfig, SourceConfig, DetectionConfig,
@@ -117,6 +118,16 @@ class ProjectEditorTab(QWidget):
         self._iou = 0.45
         self._imgsz = 640
 
+        # Live-detection engine. Owns its own DetectionEngine (NOT shared
+        # with Single tab) so the user can A/B detection vs zone geometry
+        # without disturbing a running pipeline. GPU contention is
+        # avoided via the ``can_start_detection_cb`` set by MainWindow.
+        self._engine = DetectionEngine()
+        self._model_loaded = False
+        self._detecting = False
+        self._class_name_to_id: dict[str, int] = {}
+        self.can_start_detection_cb: callable | None = None
+
         # Preview thread.
         self._preview_worker: _PreviewWorker | None = None
         self._preview_thread: QThread | None = None
@@ -139,15 +150,10 @@ class ProjectEditorTab(QWidget):
         self._sidebar = EditorSidebar()
         layout.addWidget(self._sidebar)
 
-        # The MCT sidebar still has the Start Detection button + Show
-        # Detections checkbox + draw-mode combo because we lifted it
-        # whole. Hide them — this tab doesn't run inference. The same
-        # sidebar can later be modernized to drop these widgets entirely
-        # if we don't want to keep mirroring MCT.
-        for attr in ("btn_start_stop", "chk_show_detections", "combo_draw_mode"):
-            w = getattr(self._sidebar, attr, None)
-            if w is not None:
-                w.setVisible(False)
+        # All MCT sidebar widgets visible — including the Start Detection
+        # button + Show Detections checkbox + Box/Dot draw-mode combo.
+        # The editor's live preview is opt-in via Start Detection so the
+        # user can verify zone/line geometry against real moving objects.
 
         # The interactive zone/line edit overlay is a QObject that hooks
         # into the video widget's mouse signals — not a widget added
@@ -160,10 +166,20 @@ class ProjectEditorTab(QWidget):
         sb.btn_refresh_cameras.clicked.connect(self._on_scan_cameras)
         sb.btn_browse_file.clicked.connect(self._on_browse_video_file)
         sb.btn_connect.clicked.connect(self._on_toggle_connect)
+        sb.btn_start_stop.clicked.connect(self._on_toggle_detection)
 
         sb.conf_changed.connect(lambda v: self._update_param("conf", v))
         sb.iou_changed.connect(lambda v: self._update_param("iou", v))
         sb.imgsz_changed.connect(lambda v: self._update_param("imgsz", v))
+
+        # Detect-classes filter — set on the engine so YOLO only emits
+        # the user-selected classes (per-frame; takes effect on the next
+        # detection run).
+        sb.detect_classes_changed.connect(self._on_detect_classes_changed)
+
+        # View toggles wired straight to the video widget.
+        sb.show_detections_changed.connect(self._video.set_show_detections)
+        sb.draw_mode_changed.connect(self._video.set_draw_mode)
 
         sb.add_zone_requested.connect(self._on_start_draw_zone)
         sb.add_line_requested.connect(self._on_start_draw_line)
@@ -191,10 +207,29 @@ class ProjectEditorTab(QWidget):
             "Model Files (*.pt *.onnx);;All Files (*)")
         if not path:
             return
+        self._load_model_into_engine(path)
+
+    def _load_model_into_engine(self, path: str) -> None:
+        """Load ``path`` into the editor's DetectionEngine and populate
+        the class-filter combo. Used both by the Browse Model button and
+        by Load Project (when the saved project has a valid model_path)."""
         self._model_path = path
         self._sidebar.model_entry.setText(os.path.basename(path))
-        self._sidebar.lbl_model_status.setText("Path recorded (no live load)")
-        self.status_text.emit(f"Model path set: {path}")
+        self._sidebar.lbl_model_status.setText("Loading model...")
+        try:
+            device_name = self._engine.load_model(path)
+            self._model_loaded = True
+            self._sidebar.lbl_model_status.setText(f"Loaded on {device_name}")
+            self._sidebar.lbl_device.setText(f"Device: {device_name}")
+            class_names = list(self._engine.model_names.values())
+            self._class_name_to_id = {
+                name: cid for cid, name in self._engine.model_names.items()}
+            self._sidebar.set_available_classes(class_names)
+            self.status_text.emit(f"Model loaded on {device_name}")
+        except Exception as e:
+            self._model_loaded = False
+            self._sidebar.lbl_model_status.setText(f"Error: {e}")
+            QMessageBox.warning(self, "Model Error", str(e))
 
     @Slot()
     def _on_scan_cameras(self) -> None:
@@ -241,6 +276,93 @@ class ProjectEditorTab(QWidget):
             self._source.release()
         self._source = None
         self._sidebar.set_connected(False)
+
+    # ======================================
+    # -------- 5a. DETECTION LIFECYCLE --------
+    # ======================================
+
+    @Slot()
+    def _on_toggle_detection(self) -> None:
+        if self._detecting:
+            self._stop_detection()
+        else:
+            self._start_detection()
+
+    def _start_detection(self) -> None:
+        # Guard rails: model loaded, source connected.
+        if not self._model_loaded:
+            QMessageBox.warning(self, "No model", "Load a model first.")
+            return
+        if self._source is None or not self._source.is_opened:
+            QMessageBox.warning(self, "No source",
+                                "Connect to a video source first.")
+            return
+        # GPU mutual-exclusion with Single/Fleet tabs (set by MainWindow).
+        if self.can_start_detection_cb is not None and not self.can_start_detection_cb():
+            QMessageBox.warning(
+                self, "Pipeline already running",
+                "Another tab is running a pipeline. Stop it before starting "
+                "detection here — only one CUDA session per model at a time.")
+            return
+
+        # Stop the no-detect preview so the DetectionEngine can own the
+        # video source exclusively.
+        self._stop_preview()
+
+        ids = self._current_detect_class_ids()
+        self._engine.set_classes(ids)
+        self._engine.start(
+            source=self._source,
+            conf=self._conf, iou=self._iou, imgsz=self._imgsz,
+            on_frame=self._on_detection_frame,
+            on_error=self._on_detection_error,
+            on_finished=self._on_detection_finished,
+            classes=ids,
+        )
+        self._detecting = True
+        self._sidebar.btn_start_stop.setText("■  Stop Detection")
+        self.status_text.emit("Detection started")
+
+    def _stop_detection(self) -> None:
+        if not self._detecting:
+            return
+        self._engine.stop()
+        self._detecting = False
+        self._sidebar.btn_start_stop.setText("▶  Start Detection")
+        # Resume the no-detect preview so the user keeps seeing frames.
+        if self._source is not None and self._source.is_opened:
+            self._start_preview()
+        self.status_text.emit("Detection stopped")
+
+    def _current_detect_class_ids(self) -> list[int] | None:
+        names = self._sidebar.detect_class_combo.get_selected_classes()
+        if not names or not self._class_name_to_id:
+            return None
+        ids = [self._class_name_to_id[n] for n in names if n in self._class_name_to_id]
+        return ids or None
+
+    @Slot(list)
+    def _on_detect_classes_changed(self, _names: list[str]) -> None:
+        ids = self._current_detect_class_ids()
+        self._engine.set_classes(ids)
+
+    @Slot(np.ndarray, object, float, float)
+    def _on_detection_frame(self, frame: np.ndarray, result,
+                            inference_ms: float, _frame_time: float) -> None:
+        # No tracker/zone event evaluation here — the user just wants to
+        # see boxes overlaid on their zone/line geometry. For real event
+        # firing they switch to Single tab.
+        self._video.update_frame(frame, result, self._config)
+
+    @Slot(str)
+    def _on_detection_error(self, msg: str) -> None:
+        self.status_text.emit(f"Detection error: {msg}")
+
+    @Slot()
+    def _on_detection_finished(self) -> None:
+        # Engine finished naturally (e.g. file source ended). Reset UI.
+        self._detecting = False
+        self._sidebar.btn_start_stop.setText("▶  Start Detection")
 
     # ======================================
     # -------- 5. PREVIEW LOOP --------
@@ -432,13 +554,14 @@ class ProjectEditorTab(QWidget):
             return
 
         self._project_path = path
-        self._model_path = project.model_path or ""
-        if self._model_path:
-            self._sidebar.model_entry.setText(os.path.basename(self._model_path))
-            if os.path.isfile(self._model_path):
-                self._sidebar.lbl_model_status.setText("Path recorded (no live load)")
-            else:
-                self._sidebar.lbl_model_status.setText("Model file not found at saved path")
+        if project.model_path and os.path.isfile(project.model_path):
+            # Auto-load the model so the user can hit Start Detection
+            # immediately after Load Project.
+            self._load_model_into_engine(project.model_path)
+        elif project.model_path:
+            self._model_path = project.model_path
+            self._sidebar.model_entry.setText(os.path.basename(project.model_path))
+            self._sidebar.lbl_model_status.setText("Model file not found at saved path")
 
         src = project.source
         if src.type == "rtsp":
@@ -514,17 +637,19 @@ class ProjectEditorTab(QWidget):
     # ======================================
 
     def is_running(self) -> bool:
-        """True while the preview thread is alive — main_window's tab-
-        switch confirm uses this. We treat "preview is running" the same
-        way SingleTab treats "pipeline is running": leaving the tab
-        prompts a confirmation."""
+        """True while live detection OR the no-detect preview thread is
+        alive. main_window's tab-switch confirm uses this — leaving the
+        tab with either running prompts the user."""
+        if self._detecting:
+            return True
         return (self._preview_thread is not None
                 and self._preview_thread.isRunning())
 
     def stop_running(self) -> None:
-        """Stop the preview thread + release the source (no event flushing
-        like SingleTab — there are no events here). Called by main_window
-        when the user confirms a tab switch."""
+        """Stop detection (if running), stop preview, release the source.
+        Called by main_window when the user confirms a tab switch."""
+        if self._detecting:
+            self._stop_detection()
         self._stop_preview()
         if self._source is not None and self._source.is_opened:
             self._source.release()

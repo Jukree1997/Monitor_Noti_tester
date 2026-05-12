@@ -75,6 +75,13 @@ class MainWindow(QMainWindow):
         self._editor_tab.status_text.connect(self._status_bar.showMessage)
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
+        # GPU mutual-exclusion: the editor tab calls this before starting
+        # its own DetectionEngine so we never have two CUDA sessions
+        # fighting over the same model in the same process.
+        self._editor_tab.can_start_detection_cb = (
+            lambda: not (self._single_tab.is_running()
+                         or self._fleet_tab.is_any_running()))
+
     # ───────── menu actions ─────────
     # Project I/O routes to whichever project-aware tab is active:
     #   - Single tab: the runtime project that gets run.

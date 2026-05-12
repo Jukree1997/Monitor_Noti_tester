@@ -7,6 +7,9 @@ from PySide6.QtWidgets import (
     QFileDialog, QScrollArea, QListWidget, QListWidgetItem, QCheckBox,
     QInputDialog, QSizePolicy,
 )
+# Re-use the multi-select dropdown from the runtime sidebar so the
+# editor's class filter has the same UX as Single Project's.
+from ui.sidebar import CheckableComboBox
 
 ACCENT = "#E8740C"
 ACCENT_HOVER = "#CF6700"
@@ -127,6 +130,9 @@ class EditorSidebar(QWidget):
     add_line_requested = Signal(str)   # line name
     load_project_requested = Signal()
     save_project_requested = Signal()
+    # Emits the list of class-name strings the user has checked in the
+    # multi-select dropdown. Empty list means "no filter — show all".
+    detect_classes_changed = Signal(list)
     draw_mode_changed = Signal(str)
     show_detections_changed = Signal(bool)
     zone_toggled = Signal(str, bool)   # zone_id, enabled
@@ -316,6 +322,22 @@ class EditorSidebar(QWidget):
         self.lbl_scale_info.setStyleSheet("color: gray; font-size: 11px;")
         self.lbl_scale_info.setWordWrap(True)
         lay.addWidget(self.lbl_scale_info)
+
+        # Detect-classes selector — populated once a model loads
+        # (set_available_classes). Empty selection = no filter.
+        detect_row = QHBoxLayout()
+        detect_row.addWidget(QLabel("Detect classes:"))
+        self.detect_class_combo = CheckableComboBox()
+        self.detect_class_combo.selection_changed.connect(
+            lambda: self.detect_classes_changed.emit(
+                self.detect_class_combo.get_selected_classes()))
+        detect_row.addWidget(self.detect_class_combo, stretch=1)
+        lay.addLayout(detect_row)
+
+    def set_available_classes(self, class_names: list[str]) -> None:
+        """Populate the detect-classes dropdown from the loaded model's
+        class names. Called by the tab after a successful model load."""
+        self.detect_class_combo.set_available_classes(class_names)
 
     def update_scale_info(self, src_w: int, src_h: int, imgsz: int):
         """Refresh the feed→inference scale label and the warning glyph."""
