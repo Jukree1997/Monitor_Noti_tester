@@ -1,6 +1,6 @@
 """Application shell — owns the menu bar, status bar, and a tab widget that
-hosts SingleTab + FleetTab. All pipeline-specific state and behavior live in
-the tabs themselves.
+hosts SingleTab + FleetTab + ProjectEditorTab. All pipeline-specific state
+and behavior live in the tabs themselves.
 """
 from __future__ import annotations
 from PySide6.QtCore import Qt, Slot
@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 from ui.single_tab import SingleTab
 from ui.fleet_tab import FleetTab
+from ui.project_editor_tab import ProjectEditorTab
 
 
 class MainWindow(QMainWindow):
@@ -36,8 +37,10 @@ class MainWindow(QMainWindow):
         self._tabs.setTabPosition(QTabWidget.TabPosition.North)
         self._single_tab = SingleTab()
         self._fleet_tab = FleetTab()
+        self._editor_tab = ProjectEditorTab()
         self._tabs.addTab(self._single_tab, "Single Project")
         self._tabs.addTab(self._fleet_tab, "Fleet")
+        self._tabs.addTab(self._editor_tab, "Project Editor")
         self.setCentralWidget(self._tabs)
 
     def _build_menu(self):
@@ -69,31 +72,47 @@ class MainWindow(QMainWindow):
     def _wire(self):
         self._single_tab.status_text.connect(self._status_bar.showMessage)
         self._fleet_tab.status_text.connect(self._status_bar.showMessage)
+        self._editor_tab.status_text.connect(self._status_bar.showMessage)
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
+        # GPU mutual-exclusion: the editor tab calls this before starting
+        # its own DetectionEngine so we never have two CUDA sessions
+        # fighting over the same model in the same process.
+        self._editor_tab.can_start_detection_cb = (
+            lambda: not (self._single_tab.is_running()
+                         or self._fleet_tab.is_any_running()))
+
     # ───────── menu actions ─────────
-    # Project I/O always targets Single tab — Fleet has no per-tab project.
-    # When the user is on the Fleet tab, the menu silently switches to Single
-    # and applies the action; that matches user intent (you're editing a
-    # project, not the fleet itself).
+    # Project I/O routes to whichever project-aware tab is active:
+    #   - Single tab: the runtime project that gets run.
+    #   - Project Editor tab: same project JSON shape, just opened for
+    #     editing without inference.
+    # Fleet has no per-tab project, so the menu silently switches to
+    # Single when invoked from Fleet — matches user intent (you're
+    # editing/loading a project, not the fleet itself).
+
+    def _project_tab(self):
+        """Return the currently-active project-aware tab — Single or
+        Editor. Falls back to Single for Fleet (no per-tab project),
+        switching to the Single tab on the way."""
+        current = self._tabs.currentWidget()
+        if current is self._editor_tab:
+            return self._editor_tab
+        if current is not self._single_tab:
+            self._tabs.setCurrentWidget(self._single_tab)
+        return self._single_tab
 
     @Slot()
     def _on_menu_load(self):
-        if self._tabs.currentWidget() is not self._single_tab:
-            self._tabs.setCurrentWidget(self._single_tab)
-        self._single_tab.load_project_dialog()
+        self._project_tab().load_project_dialog()
 
     @Slot()
     def _on_menu_save(self):
-        if self._tabs.currentWidget() is not self._single_tab:
-            self._tabs.setCurrentWidget(self._single_tab)
-        self._single_tab.save_project(False)
+        self._project_tab().save_project(False)
 
     @Slot()
     def _on_menu_save_as(self):
-        if self._tabs.currentWidget() is not self._single_tab:
-            self._tabs.setCurrentWidget(self._single_tab)
-        self._single_tab.save_project(True)
+        self._project_tab().save_project(True)
 
     # ───────── tab-switch confirm ─────────
 
@@ -120,11 +139,14 @@ class MainWindow(QMainWindow):
         elif from_tab is self._fleet_tab:
             is_running = self._fleet_tab.is_any_running()
             from_label = "Fleet"
+        elif from_tab is self._editor_tab:
+            is_running = self._editor_tab.is_running()
+            from_label = "Editor preview"
 
         if is_running:
             answer = QMessageBox.question(
                 self, "Stop running pipeline?",
-                f"Stop the running {from_label} pipeline before switching tabs?\n"
+                f"Stop the running {from_label} before switching tabs?\n"
                 "Running detection will be terminated.",
                 QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
                 QMessageBox.StandardButton.Cancel)
@@ -139,6 +161,8 @@ class MainWindow(QMainWindow):
                 self._single_tab.stop_running()
             elif from_tab is self._fleet_tab:
                 self._fleet_tab.stop_all()
+            elif from_tab is self._editor_tab:
+                self._editor_tab.stop_running()
 
         self._current_index = new_index
 
@@ -147,4 +171,5 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._single_tab.shutdown()
         self._fleet_tab.shutdown()
+        self._editor_tab.shutdown()
         event.accept()
