@@ -336,8 +336,12 @@ class EditorSidebar(QWidget):
 
     def set_available_classes(self, class_names: list[str]) -> None:
         """Populate the detect-classes dropdown from the loaded model's
-        class names. Called by the tab after a successful model load."""
-        self.detect_class_combo.set_available_classes(class_names)
+        class names. Called by the tab after a successful model load.
+
+        Note: the CheckableComboBox method is ``add_classes``, not
+        ``set_available_classes`` — matches what Single Project's sidebar
+        calls."""
+        self.detect_class_combo.add_classes(class_names)
 
     def update_scale_info(self, src_w: int, src_h: int, imgsz: int):
         """Refresh the feed→inference scale label and the warning glyph."""
