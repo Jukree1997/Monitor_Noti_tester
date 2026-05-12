@@ -31,6 +31,7 @@ from ui.editor_video_widget import EditorVideoWidget
 from ui.editor_sidebar import EditorSidebar
 from ui.zone_editor import ZoneLineEditor
 from core.detector import DetectionEngine
+from core.paths import default_config_dir, default_models_dir, default_videos_dir
 from core.video_source import VideoSource
 from models.config_schema import (
     MonitorConfig, ProjectConfig, SourceConfig, DetectionConfig,
@@ -202,8 +203,13 @@ class ProjectEditorTab(QWidget):
 
     @Slot()
     def _on_browse_model(self) -> None:
+        # Default to <app>/models/ so models shipped with the install
+        # show up without the user navigating to home dir first.
+        start_dir = str(default_models_dir())
+        if self._model_path and os.path.isfile(self._model_path):
+            start_dir = self._model_path  # remember last pick
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Model", "",
+            self, "Select Model", start_dir,
             "Model Files (*.pt *.onnx);;All Files (*)")
         if not path:
             return
@@ -238,8 +244,13 @@ class ProjectEditorTab(QWidget):
 
     @Slot()
     def _on_browse_video_file(self) -> None:
+        # Default to <app>/videos/ if it exists, else user's home dir.
+        # We don't auto-create the dir — users usually have their own
+        # videos folder elsewhere.
+        videos = default_videos_dir()
+        start_dir = str(videos) if videos.is_dir() else ""
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Video File", "",
+            self, "Select Video File", start_dir,
             "Video Files (*.mp4 *.avi *.mov *.mkv);;All Files (*)")
         if path:
             self._sidebar.file_entry.setText(path)
@@ -400,6 +411,14 @@ class ProjectEditorTab(QWidget):
 
     @Slot()
     def _on_preview_finished(self) -> None:
+        # If we stopped the preview to hand off to live detection, the
+        # source is still open and owned by the engine — leave the
+        # Connect button alone. (Without this guard, the file-source
+        # branch below would mark the sidebar disconnected the moment
+        # Start Detection ran, even though the engine was about to use
+        # the same source.)
+        if self._detecting:
+            return
         # File source ended naturally — keep video widget on last frame,
         # reflect disconnected state.
         if self._source is not None and not self._source.is_live:
@@ -539,8 +558,11 @@ class ProjectEditorTab(QWidget):
 
     def load_project_dialog(self) -> None:
         """Called from MainWindow's File → Load Project menu."""
+        # Default to <app>/config/ so project JSONs that ship with the
+        # install (or that the user saved earlier) are one click away.
+        start_dir = self._project_path or str(default_config_dir())
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load Project Config", "",
+            self, "Load Project Config", start_dir,
             "JSON Files (*.json);;All Files (*)")
         if not path:
             return
@@ -598,9 +620,10 @@ class ProjectEditorTab(QWidget):
             self._save_project_path(self._project_path)
             return
 
+        start_dir = self._project_path or str(default_config_dir())
         path, selected_filter = QFileDialog.getSaveFileName(
             self, "Save Project Config",
-            self._project_path or "",
+            start_dir,
             "JSON Files (*.json);;All Files (*)")
         if not path:
             return

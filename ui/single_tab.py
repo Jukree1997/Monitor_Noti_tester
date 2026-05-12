@@ -20,6 +20,7 @@ from core.detector import DetectionEngine
 from core.video_source import VideoSource
 from core.runner import PipelineRunner
 from core.event_exporter import export_events
+from core.paths import default_config_dir, default_videos_dir
 from models.config_schema import (
     ProjectConfig, MonitorConfig,
     NotiSettings, LineAlertConfig, LineNotiRule,
@@ -189,8 +190,13 @@ class SingleTab(QWidget):
 
     @Slot()
     def load_project_dialog(self):
+        # Default to <app>/config/ so project JSONs that ship with the
+        # install are one click away. Same default the Project Editor
+        # tab uses — keeps file-pickers consistent across tabs.
+        start_dir = self._project_path or str(default_config_dir())
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load Project Config", "", "JSON Files (*.json);;All Files (*)")
+            self, "Load Project Config", start_dir,
+            "JSON Files (*.json);;All Files (*)")
         if not path:
             return
         self._load_project_from_path(path)
@@ -259,9 +265,10 @@ class SingleTab(QWidget):
             return
         path = self._project_path if (self._project_path and not force_dialog) else None
         if path is None:
+            start_dir = self._project_path or str(default_config_dir())
             path, _ = QFileDialog.getSaveFileName(
                 self, "Save Project Config",
-                self._project_path or "",
+                start_dir,
                 "JSON Files (*.json);;All Files (*)")
             if not path:
                 return
@@ -684,8 +691,12 @@ class SingleTab(QWidget):
     def _on_browse_video_requested(self):
         if not self._project or self._project.source.type != "file":
             return
+        # Prefer the project's current file location; else fall back to
+        # <app>/videos/ if it exists; else home dir.
+        videos = default_videos_dir()
         start_dir = (os.path.dirname(self._project.source.value)
-                     if self._project.source.value else "")
+                     if self._project.source.value
+                     else (str(videos) if videos.is_dir() else ""))
         new_path, _ = QFileDialog.getOpenFileName(
             self, "Select video file", start_dir,
             "Videos (*.mp4 *.avi *.mov *.mkv *.webm);;All Files (*)")
