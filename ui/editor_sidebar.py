@@ -164,6 +164,36 @@ class EditorSidebar(QWidget):
         top_bar.addWidget(self.btn_collapse_all)
         main_layout.addLayout(top_bar)
 
+        # === Row 0b: Project Load/Save — always visible, matches the
+        # Single Project tab's sidebar styling so the two tabs feel like
+        # parts of the same app. Lives outside the collapsible sections
+        # so the user can save at any time without scrolling around.
+        project_row = QHBoxLayout()
+        project_row.setContentsMargins(10, 0, 10, 6)
+        project_row.setSpacing(6)
+
+        self.btn_load_project = styled_button("Load Project")
+        self.btn_load_project.setStyleSheet("""
+            QPushButton { background-color: #3A7CA5; color: white; border: none;
+                border-radius: 4px; padding: 6px 12px; font-weight: bold; }
+            QPushButton:hover { background-color: #2E6585; }
+            QPushButton:disabled { background-color: #555; color: #aaa; }
+        """)
+        self.btn_load_project.clicked.connect(self.load_project_requested.emit)
+        project_row.addWidget(self.btn_load_project, 1)
+
+        self.btn_save_project = styled_button("Save Project")
+        self.btn_save_project.setStyleSheet("""
+            QPushButton { background-color: #1F7A8C; color: white; border: none;
+                border-radius: 4px; padding: 6px 12px; font-weight: bold; }
+            QPushButton:hover { background-color: #175E6D; }
+            QPushButton:disabled { background-color: #555; color: #aaa; }
+        """)
+        self.btn_save_project.clicked.connect(self.save_project_requested.emit)
+        project_row.addWidget(self.btn_save_project, 1)
+
+        main_layout.addLayout(project_row)
+
         # === Row 1: Scrollable Sections ===
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -449,19 +479,9 @@ class EditorSidebar(QWidget):
         # Connect list selection to show/hide line settings
         self.region_list.currentItemChanged.connect(self._on_region_selected)
 
-        # Save / Load FULL project (model path + source + detection params
-        # + zones + lines + notification settings). Mirrors the Single tab
-        # sidebar's project buttons so the Project Editor's primary save
-        # action is the same as the runtime tab's.
-        config_row = QHBoxLayout()
-        self.btn_load_project = styled_button("Load Project")
-        self.btn_load_project.clicked.connect(self.load_project_requested.emit)
-        config_row.addWidget(self.btn_load_project)
-
-        self.btn_save_project = styled_button("Save Project")
-        self.btn_save_project.clicked.connect(self.save_project_requested.emit)
-        config_row.addWidget(self.btn_save_project)
-        lay.addLayout(config_row)
+        # Project Load/Save lives at the top of the sidebar (outside
+        # this collapsible section) so it's reachable regardless of
+        # which section is expanded — see _build_ui below.
 
     # --- Notification Section (LINE OA) ---
     def _build_config_section(self):
