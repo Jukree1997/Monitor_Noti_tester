@@ -14,7 +14,9 @@ venv/
 # ======================================
 # Large; distribute separately
 
-models/
+models/*
+!models/__init__.py
+!models/*.py
 *.pt
 *.onnx
 
