@@ -33,7 +33,7 @@ from ui.zone_editor import ZoneLineEditor
 from core.video_source import VideoSource
 from models.config_schema import (
     MonitorConfig, ProjectConfig, SourceConfig, DetectionConfig,
-    NotificationConfig, Zone, Line,
+    NotificationConfig, NotiSettings, Zone, Line,
 )
 
 
@@ -107,7 +107,11 @@ class ProjectEditorTab(QWidget):
         self._source: VideoSource | None = None
         self._config = MonitorConfig()
         self._project_path: str = ""
-        self._project_passthrough: dict = {}
+        # Preserved across a load→save round-trip so the editor doesn't
+        # silently drop the runtime tab's line/zone notification rules.
+        # The editor doesn't have UI for editing these (yet), so we just
+        # round-trip whatever was loaded.
+        self._loaded_noti_settings: NotiSettings = NotiSettings()
         self._model_path: str = ""
         self._conf = 0.40
         self._iou = 0.45
@@ -168,8 +172,8 @@ class ProjectEditorTab(QWidget):
         sb.line_flip.connect(self._on_flip_line)
         sb.edit_mode_requested.connect(self._on_enter_edit_mode)
 
-        sb.load_config.connect(self._on_load_config)
-        sb.save_config.connect(self._on_save_config)
+        sb.load_project_requested.connect(self.load_project_dialog)
+        sb.save_project_requested.connect(lambda: self.save_project(False))
 
         self._editor.zone_created.connect(self._on_zone_created)
         self._editor.line_created.connect(self._on_line_created)
@@ -408,41 +412,7 @@ class ProjectEditorTab(QWidget):
         return f"{name}_{max_num + 1}"
 
     # ======================================
-    # -------- 8. ZONES/LINES JSON --------
-    # ======================================
-
-    @Slot()
-    def _on_load_config(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open Zones/Lines Config", "",
-            "JSON Files (*.json);;All Files (*)")
-        if not path:
-            return
-        try:
-            self._config = MonitorConfig.load(path)
-            self._sync_video_overlay()
-            self._refresh_region_list()
-            self.status_text.emit(f"Config loaded: {path}")
-        except Exception as e:
-            QMessageBox.warning(self, "Config Error", str(e))
-
-    @Slot()
-    def _on_save_config(self) -> None:
-        path, selected_filter = QFileDialog.getSaveFileName(
-            self, "Save Zones/Lines Config", "",
-            "JSON Files (*.json);;All Files (*)")
-        if not path:
-            return
-        if "*.json" in selected_filter and not path.lower().endswith(".json"):
-            path += ".json"
-        try:
-            self._config.save(path)
-            self.status_text.emit(f"Config saved: {path}")
-        except Exception as e:
-            QMessageBox.warning(self, "Save Error", str(e))
-
-    # ======================================
-    # -------- 9. PROJECT JSON --------
+    # -------- 8. PROJECT JSON --------
     # ======================================
 
     def load_project_dialog(self) -> None:
@@ -492,8 +462,9 @@ class ProjectEditorTab(QWidget):
         self._sync_video_overlay()
         self._refresh_region_list()
 
-        self._project_passthrough = dict(
-            getattr(project, "_passthrough", {}) or {})
+        # Preserve noti_settings (line/zone notification rules) so we
+        # don't drop them on the next Save Project.
+        self._loaded_noti_settings = project.noti_settings
 
         self.status_text.emit(f"Project loaded: {path}")
 
@@ -528,7 +499,7 @@ class ProjectEditorTab(QWidget):
             detection=detection,
             notification=notification,
             monitor=self._config,
-            _passthrough=dict(self._project_passthrough),
+            noti_settings=self._loaded_noti_settings,
         )
 
         try:

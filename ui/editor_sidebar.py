@@ -125,8 +125,8 @@ class EditorSidebar(QWidget):
     imgsz_changed = Signal(int)
     add_zone_requested = Signal(str)   # zone name
     add_line_requested = Signal(str)   # line name
-    load_config = Signal()
-    save_config = Signal()
+    load_project_requested = Signal()
+    save_project_requested = Signal()
     draw_mode_changed = Signal(str)
     show_detections_changed = Signal(bool)
     zone_toggled = Signal(str, bool)   # zone_id, enabled
@@ -449,15 +449,18 @@ class EditorSidebar(QWidget):
         # Connect list selection to show/hide line settings
         self.region_list.currentItemChanged.connect(self._on_region_selected)
 
-        # Save / Load zone+line config
+        # Save / Load FULL project (model path + source + detection params
+        # + zones + lines + notification settings). Mirrors the Single tab
+        # sidebar's project buttons so the Project Editor's primary save
+        # action is the same as the runtime tab's.
         config_row = QHBoxLayout()
-        self.btn_save_config = styled_button("Save")
-        self.btn_save_config.clicked.connect(self.save_config.emit)
-        config_row.addWidget(self.btn_save_config)
+        self.btn_load_project = styled_button("Load Project")
+        self.btn_load_project.clicked.connect(self.load_project_requested.emit)
+        config_row.addWidget(self.btn_load_project)
 
-        self.btn_load_config = styled_button("Load")
-        self.btn_load_config.clicked.connect(self.load_config.emit)
-        config_row.addWidget(self.btn_load_config)
+        self.btn_save_project = styled_button("Save Project")
+        self.btn_save_project.clicked.connect(self.save_project_requested.emit)
+        config_row.addWidget(self.btn_save_project)
         lay.addLayout(config_row)
 
     # --- Notification Section (LINE OA) ---
