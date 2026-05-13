@@ -127,8 +127,12 @@ class UpdateChecker(QObject):
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
         self._settings = QSettings()
-        self._thread: Optional[QThread] = None
-        self._worker: Optional[_CheckWorker] = None
+        # In-flight flag. We deliberately don't hold a Python reference to
+        # the QThread/worker after starting them — keeping stale wrappers
+        # around after their C++ side gets deleteLater'd is what caused
+        # the "Internal C++ object already deleted" crash. Qt's parent
+        # ownership + the deleteLater chain handles lifecycle cleanly.
+        self._check_in_progress = False
         # _force_mode is set by check_async() and read by the result
         # handler to decide whether to surface check_failed silently.
         self._force_mode = False
@@ -139,23 +143,26 @@ class UpdateChecker(QObject):
         """Kick off a background check. `force=True` bypasses the 24h
         cache AND surfaces errors to the user (used by Help → Check for
         updates…). `force=False` is the silent startup check."""
-        if self._thread is not None and self._thread.isRunning():
+        if self._check_in_progress:
             return
         if not force and self._within_cache_window():
             return
 
+        self._check_in_progress = True
         self._force_mode = force
-        self._thread = QThread(self)
-        self._worker = _CheckWorker()
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.finished.connect(self._on_worker_finished)
-        # Cleanup: worker done → quit thread → both deleted on event-loop
-        # cycle. Prevents leaks across repeated checks.
-        self._worker.finished.connect(self._thread.quit)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._thread.finished.connect(self._thread.deleteLater)
-        self._thread.start()
+        thread = QThread(self)
+        worker = _CheckWorker()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_worker_finished)
+        # Cleanup chain: worker done → quit thread → both objects scheduled
+        # for deletion on the next event-loop tick. Locals go out of scope
+        # here; Qt's parent ownership (self as parent of thread) keeps
+        # them alive until deleteLater fires.
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
 
     def dismiss_version(self, version: str) -> None:
         """Persist a version the user clicked 'Skip this version' on, so
@@ -172,35 +179,45 @@ class UpdateChecker(QObject):
 
     @Slot(str, dict)
     def _on_worker_finished(self, kind: str, payload: dict) -> None:
-        # Whichever kind we got, we did successfully reach a decision —
-        # update the cache timestamp so the 24h gate kicks in.
-        if kind in ("update_available", "no_update"):
-            self._settings.setValue(
-                _QS_LAST_CHECK, datetime.now(timezone.utc).isoformat()
-            )
+        try:
+            # Cache the timestamp ONLY on no_update. If an update is
+            # available, we want every launch to re-show the dialog
+            # until the user explicitly dismisses it via Skip — so we
+            # deliberately don't suppress the next-launch check.
+            if kind == "no_update":
+                self._settings.setValue(
+                    _QS_LAST_CHECK, datetime.now(timezone.utc).isoformat()
+                )
 
-        if kind == "update_available":
-            version = payload["version"]
-            if version in self._load_dismissed():
-                # User skipped this exact version; treat as no-update.
+            if kind == "update_available":
+                version = payload["version"]
+                if version in self._load_dismissed():
+                    # User previously skipped this version. Auto-check
+                    # stays silent; manual check tells them they're up
+                    # to date (i.e. nothing new beyond what they
+                    # already chose to ignore).
+                    if self._force_mode:
+                        self.no_update_available.emit()
+                    return
+                notes = self._truncate_notes(payload["notes"], payload["url"])
+                self.update_available.emit(version, payload["url"], notes)
+            elif kind == "no_update":
                 if self._force_mode:
                     self.no_update_available.emit()
-                return
-            notes = self._truncate_notes(payload["notes"], payload["url"])
-            self.update_available.emit(version, payload["url"], notes)
-        elif kind == "no_update":
-            if self._force_mode:
-                self.no_update_available.emit()
-        else:  # error
-            # On auto-check, swallow silently (offline shouldn't nag).
-            # On manual trigger, surface so the user knows the click did
-            # something.
-            if self._force_mode:
-                self.check_failed.emit(payload.get("reason", "unknown error"))
-
-        self._thread = None
-        self._worker = None
-        self._force_mode = False
+            else:  # error
+                # On auto-check, swallow silently (offline shouldn't nag).
+                # On manual trigger, surface so the user knows the click
+                # did something.
+                if self._force_mode:
+                    self.check_failed.emit(
+                        payload.get("reason", "unknown error")
+                    )
+        finally:
+            # Always reset the in-flight flag, even on early return or
+            # exception. Without this, the dismissed-version branch
+            # would leave the checker permanently "busy".
+            self._check_in_progress = False
+            self._force_mode = False
 
     def _within_cache_window(self) -> bool:
         raw = self._settings.value(_QS_LAST_CHECK, "")
