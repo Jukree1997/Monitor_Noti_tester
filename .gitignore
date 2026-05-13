@@ -29,7 +29,15 @@ output_logs/
 output_videos/
 
 # ======================================
-# -------- 3. OS / EDITOR --------
+# -------- 3. PYINSTALLER OUTPUT --------
+# ======================================
+# Build artifacts — regenerate via `pyinstaller MNT.spec`
+
+build/
+dist/
+
+# ======================================
+# -------- 4. OS / EDITOR --------
 # ======================================
 
 .DS_Store

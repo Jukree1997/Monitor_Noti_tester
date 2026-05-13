@@ -16,7 +16,8 @@ import os
 import signal
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtCore import QCoreApplication, QTimer
 

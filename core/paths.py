@@ -1,9 +1,23 @@
 """Filesystem path helpers — single source of truth for "where do project
 JSONs and model files live by default" so file pickers across tabs all
-start in the same place, and so a future packaging pass only has to
-update one function.
+start in the same place.
+
+Two execution modes:
+  - **Dev (running from source)**: app_dir() returns the project root
+    (``<repo>/``). Default model/config/video dirs are subdirs of that.
+  - **Frozen (PyInstaller bundle)**: app_dir() returns the directory
+    containing the .exe (in one-folder mode that's the install dir).
+    Customers can drop models into ``<install>/models/`` next to the
+    exe.
+
+The frozen path uses ``sys.executable`` rather than ``__file__`` because
+PyInstaller's one-folder mode lays out files relative to the exe, while
+one-file mode has ``__file__`` pointing into a temp _MEIPASS extraction
+that gets wiped between runs. ``sys.executable.parent`` works for both
+modes and matches what users see in their installer.
 """
 from __future__ import annotations
+import sys
 from pathlib import Path
 
 
@@ -11,16 +25,21 @@ from pathlib import Path
 # -------- APP ROOT --------
 # ======================================
 
-def app_dir() -> Path:
-    """Return the Monitor_Noti_tester project root.
+def is_frozen() -> bool:
+    """True when running as a PyInstaller bundle (or any other frozen
+    executable). Used by other modules that need to know whether
+    ``__file__`` paths are meaningful."""
+    return getattr(sys, "frozen", False)
 
-    Resolved from this file's location: ``<root>/core/paths.py`` → parent
-    of ``core/`` is the root. Works when running from source. When the
-    app is later bundled via PyInstaller, this needs an override to
-    return the user-data dir (``~/.config/MonitorNoti/`` on Linux,
-    ``%APPDATA%/MonitorNoti/`` on Windows) instead — see the packaging
-    plan for the swap.
-    """
+
+def app_dir() -> Path:
+    """Return the directory the app considers its 'root' for default
+    file-picker locations.
+
+    In a frozen bundle this is the install dir (where the .exe lives).
+    In dev this is the repo root (parent of ``core/``)."""
+    if is_frozen():
+        return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent
 
 
