@@ -37,9 +37,15 @@ def worker_main(project_path: str, in_queue, out_queue,
     # ── path setup must happen BEFORE imports of project modules ──
     import os
     import sys
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
+    # When running from source, the subprocess needs the project root on
+    # sys.path to import `core.detector` etc. In a PyInstaller bundle,
+    # sys.path is already set up by the bootloader and __file__ points
+    # at a frozen path that's NOT the project root, so this hack would
+    # corrupt sys.path. Skip it for frozen mode.
+    if not getattr(sys, "frozen", False):
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
 
     import time
     import queue as queue_mod

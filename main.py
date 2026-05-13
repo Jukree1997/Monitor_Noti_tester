@@ -11,8 +11,9 @@ import faulthandler
 #      first cross-thread QThread.start() — observed during Part 1 testing.
 faulthandler.enable()
 
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add project root to path (source-only — PyInstaller sets sys.path itself).
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtWidgets import QApplication, QDialog
 from PySide6.QtCore import Qt
