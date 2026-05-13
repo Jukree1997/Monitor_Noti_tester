@@ -195,13 +195,13 @@ class UpdateChecker(QObject):
 
             if kind == "update_available":
                 version = payload["version"]
-                if version in self._load_dismissed():
-                    # User previously skipped this version. Auto-check
-                    # stays silent; manual check tells them they're up
-                    # to date (i.e. nothing new beyond what they
-                    # already chose to ignore).
-                    if self._force_mode:
-                        self.no_update_available.emit()
+                if version in self._load_dismissed() and not self._force_mode:
+                    # Auto-check on launch + user previously skipped
+                    # this version → silently respect the skip (don't
+                    # nag). Manual "Check for updates…" falls through
+                    # to re-show the dialog: clicking that menu item is
+                    # a deliberate ask to see what's actually out there,
+                    # so silencing it would be dishonest UX.
                     return
                 notes = self._truncate_notes(payload["notes"], payload["url"])
                 self.update_available.emit(version, payload["url"], notes)

@@ -1,5 +1,15 @@
 import sys
 import os
+import faulthandler
+
+# Install Python's faulthandler before anything else. Two purposes:
+#   1. If the app ever does crash with SIGSEGV/SIGBUS/SIGFPE in the field,
+#      we get a Python stack trace in the terminal/log instead of a silent
+#      core dump.
+#   2. Faulthandler installs its signal handlers via sigaltstack, which on
+#      some PySide6 + conda combos avoids a transient SIGBUS during the
+#      first cross-thread QThread.start() — observed during Part 1 testing.
+faulthandler.enable()
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
