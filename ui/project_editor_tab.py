@@ -315,6 +315,10 @@ class ProjectEditorTab(QWidget):
                 "Another tab is running a pipeline. Stop it before starting "
                 "detection here — only one CUDA session per model at a time.")
             return
+        # License-cap gate (set by MainWindow). Pops its own dialog
+        # on failure with the uniform "license cap reached" wording.
+        if getattr(self, "cap_check_cb", None) is not None and not self.cap_check_cb():
+            return
 
         # Stop the no-detect preview so the DetectionEngine can own the
         # video source exclusively.

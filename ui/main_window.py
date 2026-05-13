@@ -11,14 +11,17 @@ from PySide6.QtWidgets import (
 )
 from core.version import __product_name__, __version__
 from core.updater import UpdateChecker
+from core.license import LicenseManager, LicenseState
+from ui.license_dialog import LicenseInfoDialog, ActivationDialog
 from ui.single_tab import SingleTab
 from ui.fleet_tab import FleetTab
 from ui.project_editor_tab import ProjectEditorTab
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, license_mgr: LicenseManager):
         super().__init__()
+        self._license_mgr = license_mgr
         self.setWindowTitle(f"{__product_name__}  v{__version__}")
         self.setMinimumSize(1100, 600)
         self.showMaximized()
@@ -49,8 +52,10 @@ class MainWindow(QMainWindow):
     def _build_central(self):
         self._tabs = QTabWidget()
         self._tabs.setTabPosition(QTabWidget.TabPosition.North)
-        self._single_tab = SingleTab()
-        self._fleet_tab = FleetTab()
+        self._single_tab = SingleTab(license_mgr=self._license_mgr,
+                                     can_start_camera=self._can_start_another_camera)
+        self._fleet_tab = FleetTab(license_mgr=self._license_mgr,
+                                   can_start_camera=self._can_start_another_camera)
         self._editor_tab = ProjectEditorTab()
         self._tabs.addTab(self._single_tab, "Single Project")
         self._tabs.addTab(self._fleet_tab, "Fleet")
@@ -82,6 +87,14 @@ class MainWindow(QMainWindow):
         check_updates = QAction("Check for updates…", self)
         check_updates.triggered.connect(self._on_check_for_updates)
         help_menu.addAction(check_updates)
+        help_menu.addSeparator()
+        license_info = QAction("License Info…", self)
+        license_info.triggered.connect(self._on_show_license_info)
+        help_menu.addAction(license_info)
+        deactivate = QAction("Deactivate this PC", self)
+        deactivate.triggered.connect(self._on_deactivate)
+        help_menu.addAction(deactivate)
+        help_menu.addSeparator()
         about = QAction(f"About {__product_name__}", self)
         about.triggered.connect(self._on_show_about)
         help_menu.addAction(about)
@@ -97,12 +110,24 @@ class MainWindow(QMainWindow):
         self._editor_tab.status_text.connect(self._status_bar.showMessage)
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
-        # GPU mutual-exclusion: the editor tab calls this before starting
-        # its own DetectionEngine so we never have two CUDA sessions
-        # fighting over the same model in the same process.
+        # GPU mutex stays a pure boolean check (no UI). The editor's
+        # _start_detection already shows its own "Pipeline already
+        # running" message on failure, so the callable here just
+        # returns True/False.
         self._editor_tab.can_start_detection_cb = (
             lambda: not (self._single_tab.is_running()
                          or self._fleet_tab.is_any_running()))
+
+        # Separate hook for the license cap. Returns True/False AND
+        # pops its own uniform "license cap reached" dialog on False.
+        # Set as a distinct attribute so the editor can call both gates
+        # in order and show the right message for each failure mode.
+        self._editor_tab.cap_check_cb = (
+            lambda: self._can_start_another_camera(silent=False))
+
+        # If the license is revoked / expires mid-session, surface it
+        # immediately so the customer isn't surprised on next start.
+        self._license_mgr.state_changed.connect(self._on_license_state_changed)
 
     # ───────── menu actions ─────────
     # Project I/O routes to whichever project-aware tab is active:
@@ -200,6 +225,81 @@ class MainWindow(QMainWindow):
             self, "Update check failed",
             f"Couldn't reach GitHub to check for updates.\n\n{reason}",
         )
+
+    # ───────── license cap + help menu ─────────
+
+    def active_camera_count(self) -> int:
+        """Total cameras currently running across all three tabs.
+        Single source of truth for the per-tab preflight checks."""
+        n = self._fleet_tab.running_camera_count()
+        if self._single_tab.is_running():
+            n += 1
+        if self._editor_tab.is_running():
+            n += 1
+        return n
+
+    def _can_start_another_camera(self, silent: bool = False) -> bool:
+        """Returns True if starting one more camera is within the
+        license's max_cameras cap. If silent=False, shows a uniform
+        "license cap reached" dialog on refusal so the wording is the
+        same everywhere."""
+        cap = int(self._license_mgr.entitlements.get("max_cameras") or 0)
+        active = self.active_camera_count()
+        if cap <= 0:
+            # No license info yet (shouldn't happen post-gate, but be
+            # defensive — refuse rather than crash).
+            if not silent:
+                QMessageBox.warning(
+                    self, "License not ready",
+                    "No license loaded — open Help → License Info.")
+            return False
+        if active >= cap:
+            if not silent:
+                tier = self._license_mgr.entitlements.get("tier_name", "your")
+                QMessageBox.warning(
+                    self, "License limit reached",
+                    f"Your {tier} license allows {cap} cameras to run "
+                    f"simultaneously. {active} are already running. "
+                    "Stop one or upgrade your license.")
+            return False
+        return True
+
+    @Slot()
+    def _on_show_license_info(self):
+        dlg = LicenseInfoDialog(self._license_mgr, self)
+        dlg.exec()
+        # If user deactivated, license_mgr is now UNLICENSED — the
+        # state_changed handler will deal with re-prompting.
+
+    @Slot()
+    def _on_deactivate(self):
+        # Same as the dialog button, but available directly from the
+        # Help menu for convenience.
+        dlg = LicenseInfoDialog(self._license_mgr, self)
+        dlg.exec()
+
+    @Slot(object)
+    def _on_license_state_changed(self, new_state: LicenseState):
+        # Update status bar so the user can see "offline grace" etc.
+        self._status_bar.showMessage(
+            f"License: {new_state.value}", 5000)
+        if new_state == LicenseState.UNLICENSED:
+            # User deactivated mid-session — prompt re-activation.
+            dlg = ActivationDialog(self._license_mgr, self)
+            if dlg.exec() != QMessageBox.DialogCode.Accepted:
+                self.close()
+        elif new_state == LicenseState.REVOKED:
+            QMessageBox.critical(
+                self, "License revoked",
+                "Your license has been revoked. Please contact "
+                "support. The app will now close.")
+            self.close()
+        elif new_state == LicenseState.EXPIRED:
+            QMessageBox.warning(
+                self, "License expired",
+                "Your license has expired (or offline grace exceeded). "
+                "Connect to the internet and use Help → License Info → "
+                "Refresh now to re-validate, or activate a new license.")
 
     # ───────── tab-switch confirm ─────────
 

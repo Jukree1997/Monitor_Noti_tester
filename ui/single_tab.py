@@ -81,8 +81,16 @@ class SingleTab(QWidget):
 
     status_text = Signal(str)
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None,
+                 *, license_mgr=None, can_start_camera=None):
         super().__init__(parent)
+
+        # License integration. `can_start_camera` is a callable provided
+        # by MainWindow — it returns True if the global cap allows one
+        # more camera (and shows a uniform refusal dialog if not). We
+        # keep license_mgr too for future direct queries.
+        self._license_mgr = license_mgr
+        self._can_start_camera = can_start_camera
 
         self._engine = DetectionEngine()
         self._source: VideoSource | None = None
@@ -441,6 +449,10 @@ class SingleTab(QWidget):
             return
         if not self._connected or self._source is None:
             QMessageBox.warning(self, "Not Connected", "Please connect first.")
+            return
+        # License-cap preflight. MainWindow's callable already includes
+        # Fleet + Editor in the total, so this works across tabs.
+        if self._can_start_camera is not None and not self._can_start_camera():
             return
         if mode == "start":
             noti = self._project.notification
