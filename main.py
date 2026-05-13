@@ -11,6 +11,10 @@ from ui.main_window import MainWindow
 
 def main():
     app = QApplication(sys.argv)
+    # Set org/app name so QSettings is consistent across the app
+    # (used by the update checker's 24h cache + dismissed-versions list).
+    app.setOrganizationName("Baksters")
+    app.setApplicationName("MNT")
     app.setStyle("Fusion")
 
     # Apply dark theme
