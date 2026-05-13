@@ -3,11 +3,14 @@ hosts SingleTab + FleetTab + ProjectEditorTab. All pipeline-specific state
 and behavior live in the tabs themselves.
 """
 from __future__ import annotations
+import webbrowser
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QMainWindow, QStatusBar, QTabWidget, QMessageBox,
 )
+from core.version import __product_name__, __version__
+from core.updater import UpdateChecker
 from ui.single_tab import SingleTab
 from ui.fleet_tab import FleetTab
 from ui.project_editor_tab import ProjectEditorTab
@@ -16,7 +19,7 @@ from ui.project_editor_tab import ProjectEditorTab
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Baksters Notification Runner")
+        self.setWindowTitle(f"{__product_name__}  v{__version__}")
         self.setMinimumSize(1100, 600)
         self.showMaximized()
 
@@ -29,6 +32,17 @@ class MainWindow(QMainWindow):
         # the QTabWidget mid-callback because currentChanged fires AFTER the
         # change is committed — we need the "from" index.
         self._current_index = self._tabs.currentIndex()
+
+        # Update checker. Quiet auto-check on launch — only shows UI if
+        # there's actually a newer release. Held as instance attr so it
+        # outlives __init__ and can be re-triggered from Help → Check
+        # for updates….
+        self._update_dialog: QMessageBox | None = None
+        self._updater = UpdateChecker(self)
+        self._updater.update_available.connect(self._on_update_available)
+        self._updater.no_update_available.connect(self._on_no_update_manual)
+        self._updater.check_failed.connect(self._on_update_check_failed)
+        self._updater.check_async(force=False)
 
     # ───────── build ─────────
 
@@ -63,6 +77,14 @@ class MainWindow(QMainWindow):
         exit_action.setShortcut(QKeySequence("Alt+F4"))
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+
+        help_menu = menu.addMenu("Help")
+        check_updates = QAction("Check for updates…", self)
+        check_updates.triggered.connect(self._on_check_for_updates)
+        help_menu.addAction(check_updates)
+        about = QAction(f"About {__product_name__}", self)
+        about.triggered.connect(self._on_show_about)
+        help_menu.addAction(about)
 
     def _build_status_bar(self):
         self._status_bar = QStatusBar()
@@ -113,6 +135,71 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_menu_save_as(self):
         self._project_tab().save_project(True)
+
+    # ───────── help menu / updates ─────────
+
+    @Slot()
+    def _on_check_for_updates(self):
+        self._status_bar.showMessage("Checking for updates…", 3000)
+        self._updater.check_async(force=True)
+
+    @Slot()
+    def _on_show_about(self):
+        QMessageBox.about(
+            self, f"About {__product_name__}",
+            f"<b>{__product_name__}</b><br>Version {__version__}",
+        )
+
+    @Slot(str, str, str)
+    def _on_update_available(self, version: str, url: str, notes: str):
+        # Non-modal so the user can keep working. Keep a reference to
+        # prevent Qt from garbage-collecting it before the user clicks.
+        box = QMessageBox(self)
+        box.setWindowTitle("Update available")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(
+            f"<b>{__product_name__} v{version}</b> is available "
+            f"(you have v{__version__})."
+        )
+        if notes:
+            box.setInformativeText(notes)
+        download_btn = box.addButton(
+            "Download", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(
+            "Remind me later", QMessageBox.ButtonRole.RejectRole)
+        skip_btn = box.addButton(
+            "Skip this version", QMessageBox.ButtonRole.DestructiveRole)
+        box.setModal(False)
+
+        def on_done(_result):
+            clicked = box.clickedButton()
+            if clicked is download_btn:
+                webbrowser.open(url)
+            elif clicked is skip_btn:
+                self._updater.dismiss_version(version)
+            self._update_dialog = None
+
+        box.finished.connect(on_done)
+        self._update_dialog = box
+        box.show()
+
+    @Slot()
+    def _on_no_update_manual(self):
+        # Only fires for manual Help → Check for updates… (auto-check
+        # is silent on no-update). Reassure the user the click worked.
+        QMessageBox.information(
+            self, "Up to date",
+            f"You're running the latest version (v{__version__}).",
+        )
+
+    @Slot(str)
+    def _on_update_check_failed(self, reason: str):
+        # Only fires for manual checks; auto-check swallows failures
+        # so offline launches don't nag.
+        QMessageBox.warning(
+            self, "Update check failed",
+            f"Couldn't reach GitHub to check for updates.\n\n{reason}",
+        )
 
     # ───────── tab-switch confirm ─────────
 
