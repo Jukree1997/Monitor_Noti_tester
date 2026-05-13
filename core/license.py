@@ -38,6 +38,15 @@ KEYGEN_ACCOUNT_ID = "f550b6f4-66ba-42bd-b5ae-ab526a25d1c1"
 PRODUCT_ID        = "e2ee601a-be46-4f72-b979-0ddf5a6ecd2f"
 KEYGEN_PUBLIC_KEY = "0da0ffd17ed2573a5c7aaf094f0ef5f678af6ea14f188ffaaffca8571d54c4e1"
 
+# Hardcoded policy-ID → tier-name mapping. License bearers can't read
+# the policy itself (only product token can), so we map by ID here.
+# When adding a new tier, add its policy ID to this dict.
+POLICY_ID_TO_TIER_NAME = {
+    "ddc40388-6c9d-4a87-95f5-d1c1c44ec43a": "Starter",   # placeholder — overwritten by license name lookup if present
+    "58bf6c76-f874-41b7-9f51-fb473898b69d": "Pro",
+    "9b45101e-b8ec-4a9e-8e76-a7e3f37e7a93": "Enterprise",
+}
+
 _API_BASE = f"https://api.keygen.sh/v1/accounts/{KEYGEN_ACCOUNT_ID}"
 _HTTP_TIMEOUT_S = 10
 
@@ -78,17 +87,40 @@ def _headers(license_key: str) -> dict:
 
 
 def _validate(license_key: str, fingerprint: str) -> dict:
-    """POST validate with fingerprint scope. Returns the full parsed
-    JSON (data + meta + included). Raises _KeygenError on transport
-    failure; meta.valid/meta.code tell you the validation outcome."""
-    url = f"{_API_BASE}/licenses/{license_key}/actions/validate"
-    body = {"meta": {"scope": {"fingerprint": fingerprint, "product": PRODUCT_ID}}}
+    """POST validate-key with the full key in the body + fingerprint
+    scope. Returns parsed JSON (data + meta + included). Raises
+    _KeygenError on transport failure; meta.valid/meta.code tell you
+    the validation outcome.
+
+    Uses the validate-key endpoint (not /licenses/{key}/actions/validate)
+    because signed keys (ED25519_SIGN scheme) look like `key/eyJ...`
+    which can't go cleanly in a URL path — the slash gets parsed as
+    path segments and Keygen returns 404 / invalid-route.
+    """
+    url = f"{_API_BASE}/licenses/actions/validate-key"
+    body = {
+        "data": {
+            "type": "licenses",
+            "attributes": {"key": license_key},
+        },
+        "meta": {
+            "scope": {"fingerprint": fingerprint, "product": PRODUCT_ID},
+        },
+    }
     # ?include=policy embeds the policy (and its metadata) in
     # response.included so we don't need a follow-up call to read
     # the camera cap.
     params = {"include": "policy"}
+    headers = {
+        "Content-Type": "application/vnd.api+json",
+        "Accept": "application/vnd.api+json",
+        # validate-key accepts the key in the body, no auth header
+        # needed. (Sending auth here would also work; omitting is
+        # cleaner since the key string contains URL-sensitive chars
+        # that could trip up some HTTP libs in header values.)
+    }
     try:
-        r = requests.post(url, json=body, headers=_headers(license_key),
+        r = requests.post(url, json=body, headers=headers,
                           params=params, timeout=_HTTP_TIMEOUT_S)
     except requests.RequestException as exc:
         raise _KeygenError(f"network error: {exc}") from exc
@@ -155,41 +187,42 @@ def _delete_machine(license_key: str, machine_id: str) -> None:
 # ======================================
 
 def _extract_entitlements(validate_resp: dict) -> dict:
-    """From a validate response (with ?include=policy), pull out the
-    fields our app actually cares about. Returns a flat dict ready to
-    persist via secure_storage.save()."""
+    """From a validate-key response, pull out the fields our app
+    actually cares about. Returns a flat dict ready to persist via
+    secure_storage.save().
+
+    Tier metadata sources (license bearers can't read the policy):
+      - maxMachines: directly from license.attributes (Keygen inherits
+        the policy value to the license at creation time)
+      - maxCameras: from license.attributes.metadata (set per-license
+        when creating the license in Keygen UI)
+      - tier_name: from POLICY_ID_TO_TIER_NAME using the policy ID in
+        data.relationships.policy
+    """
     data = validate_resp.get("data") or {}
     attrs = data.get("attributes", {})
     license_id = data.get("id", "")
     expiry = attrs.get("expiry")  # null = perpetual
 
-    # Find the included policy object
-    policy = None
-    for inc in validate_resp.get("included", []) or []:
-        if inc.get("type") == "policies":
-            policy = inc
-            break
-    if policy is None:
-        # Validate didn't include policy — should never happen with
-        # ?include=policy, but be defensive.
-        tier_name = "Unknown"
-        max_machines = 1
+    # maxMachines is a first-class license attribute (inherited from policy).
+    max_machines = int(attrs.get("maxMachines") or 1)
+
+    # maxCameras lives on license metadata, set per-license at creation.
+    license_meta = attrs.get("metadata") or {}
+    try:
+        max_cameras = int(license_meta.get("maxCameras") or 1)
+    except (TypeError, ValueError):
         max_cameras = 1
-    else:
-        p_attrs = policy.get("attributes", {})
-        tier_name = p_attrs.get("name", "Unknown")
-        max_machines = int(p_attrs.get("maxMachines") or 1)
-        # Policy metadata is where we stash maxCameras (see RELEASING /
-        # Keygen setup doc). Keep the lookup forgiving so a typo in
-        # Keygen UI doesn't crash the app.
-        meta = p_attrs.get("metadata") or {}
-        try:
-            max_cameras = int(meta.get("maxCameras") or 1)
-        except (TypeError, ValueError):
-            max_cameras = 1
+
+    # tier_name via policy_id lookup.
+    rels = data.get("relationships") or {}
+    policy_id = (((rels.get("policy") or {}).get("data") or {})
+                 .get("id", ""))
+    tier_name = POLICY_ID_TO_TIER_NAME.get(policy_id, "Unknown")
 
     return {
         "license_id": license_id,
+        "policy_id": policy_id,
         "tier_name": tier_name,
         "max_machines": max_machines,
         "max_cameras": max_cameras,
