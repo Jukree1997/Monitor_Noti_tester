@@ -127,12 +127,15 @@ class UpdateChecker(QObject):
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
         self._settings = QSettings()
-        # In-flight flag. We deliberately don't hold a Python reference to
-        # the QThread/worker after starting them — keeping stale wrappers
-        # around after their C++ side gets deleteLater'd is what caused
-        # the "Internal C++ object already deleted" crash. Qt's parent
-        # ownership + the deleteLater chain handles lifecycle cleanly.
-        self._check_in_progress = False
+        # We MUST hold Python refs to thread + worker while a check is
+        # in flight: worker has no QObject parent (so Qt's C++-side
+        # parent ownership doesn't keep it alive), and locals going out
+        # of scope would let PySide6 GC the wrapper, destroying the C++
+        # worker mid-HTTP-call. The check_in_flight check uses
+        # `self._thread is not None`, NOT a separate bool, so we always
+        # reason about the actual ref state.
+        self._thread: Optional[QThread] = None
+        self._worker: Optional[_CheckWorker] = None
         # _force_mode is set by check_async() and read by the result
         # handler to decide whether to surface check_failed silently.
         self._force_mode = False
@@ -143,26 +146,27 @@ class UpdateChecker(QObject):
         """Kick off a background check. `force=True` bypasses the 24h
         cache AND surfaces errors to the user (used by Help → Check for
         updates…). `force=False` is the silent startup check."""
-        if self._check_in_progress:
+        if self._thread is not None:
+            # A check is already in flight — silently skip the duplicate.
             return
         if not force and self._within_cache_window():
             return
 
-        self._check_in_progress = True
         self._force_mode = force
-        thread = QThread(self)
-        worker = _CheckWorker()
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(self._on_worker_finished)
+        self._thread = QThread(self)
+        self._worker = _CheckWorker()
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished.connect(self._on_worker_finished)
         # Cleanup chain: worker done → quit thread → both objects scheduled
-        # for deletion on the next event-loop tick. Locals go out of scope
-        # here; Qt's parent ownership (self as parent of thread) keeps
-        # them alive until deleteLater fires.
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.start()
+        # for deletion on the next event-loop tick. We still null out
+        # `self._thread`/`self._worker` in `_on_worker_finished`'s finally
+        # block so subsequent check_async calls work AND we don't hold
+        # dangling Python wrappers pointing at deleteLater'd C++.
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.start()
 
     def dismiss_version(self, version: str) -> None:
         """Persist a version the user clicked 'Skip this version' on, so
@@ -213,10 +217,12 @@ class UpdateChecker(QObject):
                         payload.get("reason", "unknown error")
                     )
         finally:
-            # Always reset the in-flight flag, even on early return or
+            # Always release thread/worker refs, even on early return or
             # exception. Without this, the dismissed-version branch
-            # would leave the checker permanently "busy".
-            self._check_in_progress = False
+            # would leave self._thread pointing at a dead C++ object and
+            # the next check_async would think a check is in flight.
+            self._thread = None
+            self._worker = None
             self._force_mode = False
 
     def _within_cache_window(self) -> bool:
