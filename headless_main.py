@@ -52,6 +52,43 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: project file not found: {args.project}", file=sys.stderr)
         return 2
 
+    # License gate — same check as the GUI uses. A headless runner can't
+    # pop UI to walk the user through activation, so on first launch the
+    # customer MUST open the GUI once to activate. After that, the
+    # cached license persists and headless invocations work.
+    #
+    # We construct a QCoreApplication early just so QSettings + the
+    # LicenseManager's QObject base work. Doing this before any heavy
+    # imports keeps startup fast when the license is invalid.
+    from PySide6.QtCore import QCoreApplication
+    _bootstrap_app = QCoreApplication.instance() or QCoreApplication(sys.argv)
+    _bootstrap_app.setOrganizationName("Baksters")
+    _bootstrap_app.setApplicationName("MNT")
+
+    from core.license import LicenseManager, LicenseState
+    license_mgr = LicenseManager()
+    if license_mgr.state not in (LicenseState.ACTIVE, LicenseState.OFFLINE_GRACE):
+        if license_mgr.state == LicenseState.UNLICENSED:
+            print("ERROR: this PC is not licensed.\n"
+                  "Run the GUI app once to activate "
+                  "(python main.py).", file=sys.stderr)
+        elif license_mgr.state == LicenseState.EXPIRED:
+            print("ERROR: license expired or offline grace period exceeded.\n"
+                  "Open the GUI app and use Help → Check for updates / "
+                  "License Info to re-validate.", file=sys.stderr)
+        elif license_mgr.state == LicenseState.REVOKED:
+            print("ERROR: license revoked. Contact support.", file=sys.stderr)
+        return 4
+
+    # Headless runs one project = one camera. Sanity-check the cap.
+    max_cameras = int(license_mgr.entitlements.get("max_cameras") or 0)
+    if max_cameras < 1:
+        print(f"ERROR: license cap is {max_cameras} cameras; cannot run.",
+              file=sys.stderr)
+        return 4
+    print(f"[headless] license: {license_mgr.entitlements.get('tier_name', '?')} "
+          f"({max_cameras} cameras allowed)")
+
     project = ProjectConfig.load(args.project)
     print(f"[headless] project: {project.project_name or args.project}")
     print(f"[headless] source: {project.source.type} = {project.source.value}")
@@ -70,7 +107,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: failed to open source: {project.source.value}", file=sys.stderr)
         return 3
 
-    app = QCoreApplication(sys.argv)
+    # Reuse the QCoreApplication created during the license-gate
+    # bootstrap above. Qt enforces a single QCoreApplication per process.
+    app = QCoreApplication.instance() or QCoreApplication(sys.argv)
     class_name_to_id = {name: cid for cid, name in engine.model_names.items()}
     runner = PipelineRunner(engine=engine, project=project, source=source,
                              class_name_to_id=class_name_to_id)

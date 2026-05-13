@@ -14,8 +14,10 @@ faulthandler.enable()
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 from PySide6.QtCore import Qt
+from core.license import LicenseManager, LicenseState
+from ui.license_dialog import ActivationDialog
 from ui.main_window import MainWindow
 
 
@@ -87,8 +89,31 @@ def main():
         }
     """)
 
-    window = MainWindow()
+    # License gate. UNLICENSED or EXPIRED → show activation dialog; if
+    # the user can't / won't activate, exit cleanly. ACTIVE / OFFLINE_GRACE
+    # → proceed straight to the main window. REVOKED → show a clear
+    # "contact support" message and exit.
+    license_mgr = LicenseManager()
+    if license_mgr.state == LicenseState.REVOKED:
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.critical(
+            None, "License revoked",
+            "This license has been revoked. Please contact support.")
+        sys.exit(1)
+    if license_mgr.state in (LicenseState.UNLICENSED, LicenseState.EXPIRED):
+        dlg = ActivationDialog(license_mgr)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            sys.exit(0)
+
+    window = MainWindow(license_mgr)
     window.show()
+
+    # Once the window is visible, kick off a background revalidate. We
+    # do this after show() so the user isn't waiting on the network
+    # before seeing UI.
+    if license_mgr.state in (LicenseState.ACTIVE, LicenseState.OFFLINE_GRACE):
+        license_mgr.revalidate_async()
+
     sys.exit(app.exec())
 
 

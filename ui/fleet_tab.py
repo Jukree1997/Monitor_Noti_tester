@@ -35,8 +35,16 @@ _TILES_PER_ROW = 3
 class FleetTab(QWidget):
     status_text = Signal(str)
 
-    def __init__(self, parent: "QWidget | None" = None):
+    def __init__(self, parent: "QWidget | None" = None,
+                 *, license_mgr=None, can_start_camera=None):
         super().__init__(parent)
+        # License integration. `can_start_camera` is provided by
+        # MainWindow and includes the cross-tab cap (Single + Editor +
+        # Fleet aggregate). Used by start/test paths only; add-time is
+        # still bounded by the hardware-based _max_workers.
+        self._license_mgr = license_mgr
+        self._can_start_camera = can_start_camera
+
         self._hardware = get_hardware_info()
         self._max_workers = self._hardware["max_workers"]
         self._manager = FleetWorkerManager(self)
@@ -53,6 +61,12 @@ class FleetTab(QWidget):
 
     def is_any_running(self) -> bool:
         return self._manager.running_count() > 0
+
+    def running_camera_count(self) -> int:
+        """Number of Fleet cameras currently running or spawning. Used
+        by MainWindow.active_camera_count() to compute the global cap
+        across Single + Fleet + Editor."""
+        return self._manager.running_count()
 
     def is_full_screen(self) -> bool:
         return self._full_view.is_attached()
@@ -399,22 +413,29 @@ class FleetTab(QWidget):
 
     # ───────── start / stop ─────────
 
-    def _start_one(self, cam_id: str, test: bool):
+    def _start_one(self, cam_id: str, test: bool, silent: bool = False):
         tile = self._tiles.get(cam_id)
         if tile is None:
-            return
-        # Re-check the limit at start time too — running count must stay <=
-        # max_workers. We already enforce add-time, but keep this defensive.
+            return False
+        # Hardware-cap preflight (existing).
         if self._manager.running_count() >= self._max_workers \
                 and self._manager.camera_state(cam_id) == S_STOPPED:
-            QMessageBox.information(
-                self, "Worker limit",
-                f"Already running {self._max_workers} workers — stop one first.")
-            return
+            if not silent:
+                QMessageBox.information(
+                    self, "Worker limit",
+                    f"Already running {self._max_workers} workers — stop one first.")
+            return False
+        # License-cap preflight (new). MainWindow's callable counts
+        # Single + Editor too, so we don't double-count.
+        if self._can_start_camera is not None \
+                and self._manager.camera_state(cam_id) == S_STOPPED \
+                and not self._can_start_camera(silent=silent):
+            return False
         tile.set_state("spawning", test_mode=test)
         self._manager.start_camera(cam_id, test_mode=test,
                                     display_opts=self._display_opts)
         self._refresh_counts()
+        return True
 
     @Slot(str)
     def _stop_one(self, cam_id: str):
@@ -425,15 +446,37 @@ class FleetTab(QWidget):
 
     @Slot()
     def _on_start_all(self):
-        for cam_id in list(self._tiles.keys()):
-            if self._manager.camera_state(cam_id) == S_STOPPED:
-                self._start_one(cam_id, test=False)
+        self._start_all(test=False)
 
     @Slot()
     def _on_test_all(self):
-        for cam_id in list(self._tiles.keys()):
-            if self._manager.camera_state(cam_id) == S_STOPPED:
-                self._start_one(cam_id, test=True)
+        self._start_all(test=True)
+
+    def _start_all(self, test: bool):
+        """Start every stopped camera, but stop at the license cap.
+        Shows the cap-reached dialog at most once, plus a status
+        message like 'started 4 of 6 (license cap reached)'."""
+        target = [cid for cid in self._tiles.keys()
+                  if self._manager.camera_state(cid) == S_STOPPED]
+        started = 0
+        cap_hit = False
+        for cam_id in target:
+            # silent=True so we don't pop the cap dialog for every
+            # subsequent camera — we'll do one summary message below.
+            ok = self._start_one(cam_id, test=test, silent=cap_hit)
+            if ok:
+                started += 1
+            else:
+                cap_hit = True
+        if cap_hit and started < len(target):
+            QMessageBox.information(
+                self, "License limit reached",
+                f"Started {started} of {len(target)} cameras. "
+                "Your license cap was reached; stop one running camera "
+                "or upgrade your license to start more.")
+        self.status_text.emit(
+            f"Started {started} of {len(target)} cameras"
+            + (" — license cap reached" if cap_hit else ""))
 
     @Slot()
     def _on_stop_all(self):
