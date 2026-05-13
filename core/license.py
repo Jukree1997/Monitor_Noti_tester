@@ -274,16 +274,17 @@ class LicenseManager(QObject):
         self._thread: Optional[QThread] = None
         self._worker: Optional[_RevalidateWorker] = None
 
-        self._load_cache()
-
-        # Periodic revalidation while the app is open. We deliberately
-        # don't auto-revalidate on app startup here — main.py runs the
-        # gate logic first; if state is ACTIVE/OFFLINE_GRACE, it lets
-        # the app continue and the periodic timer below will catch any
-        # remote state changes within 24h.
+        # Periodic revalidation timer — must exist BEFORE _load_cache()
+        # because that calls self._timer.start() on the ACTIVE branch.
+        # (Easy to miss: first run has no cache → UNLICENSED branch
+        # skips the timer.start() call entirely → looks fine. Second
+        # run loads a valid cache, takes the ACTIVE branch, and crashes
+        # with AttributeError if the timer hasn't been created yet.)
         self._timer = QTimer(self)
         self._timer.setInterval(_REVALIDATE_INTERVAL_MS)
         self._timer.timeout.connect(self.revalidate_async)
+
+        self._load_cache()
 
     # ---------- public properties ----------
 
