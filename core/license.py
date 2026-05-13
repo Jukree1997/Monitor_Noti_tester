@@ -98,30 +98,22 @@ def _validate(license_key: str, fingerprint: str) -> dict:
     path segments and Keygen returns 404 / invalid-route.
     """
     url = f"{_API_BASE}/licenses/actions/validate-key"
+    # Body shape is {meta: {key, scope}} — verified against the live
+    # Keygen API. The {data: {...}, meta: {...}} shape from some docs
+    # returns HTTP 400.
     body = {
-        "data": {
-            "type": "licenses",
-            "attributes": {"key": license_key},
-        },
         "meta": {
+            "key": license_key,
             "scope": {"fingerprint": fingerprint, "product": PRODUCT_ID},
         },
     }
-    # ?include=policy embeds the policy (and its metadata) in
-    # response.included so we don't need a follow-up call to read
-    # the camera cap.
-    params = {"include": "policy"}
     headers = {
         "Content-Type": "application/vnd.api+json",
         "Accept": "application/vnd.api+json",
-        # validate-key accepts the key in the body, no auth header
-        # needed. (Sending auth here would also work; omitting is
-        # cleaner since the key string contains URL-sensitive chars
-        # that could trip up some HTTP libs in header values.)
     }
     try:
         r = requests.post(url, json=body, headers=headers,
-                          params=params, timeout=_HTTP_TIMEOUT_S)
+                          timeout=_HTTP_TIMEOUT_S)
     except requests.RequestException as exc:
         raise _KeygenError(f"network error: {exc}") from exc
     if r.status_code >= 500:
