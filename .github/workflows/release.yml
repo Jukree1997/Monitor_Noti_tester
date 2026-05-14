@@ -1,0 +1,189 @@
+name: Build release installers
+
+# Two ways to trigger:
+#   1. Push a v* tag → builds + creates a public Release with both
+#      installers attached. This is the normal release flow.
+#   2. Manual run from the Actions tab → builds and uploads as run
+#      artifacts (no Release created). Useful for dry-run testing
+#      after changing the spec / installer scripts.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# Both build jobs run in parallel. The release job waits for both,
+# downloads their artifacts, and creates the GitHub Release.
+permissions:
+  contents: write
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # Linux: PyInstaller → AppImage
+  # ─────────────────────────────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb-xinerama0 \
+            libxkbcommon-x11-0 \
+            libegl1 \
+            libgl1 \
+            libxcb-cursor0 \
+            libdbus-1-3
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pillow
+
+      - name: Build PyInstaller bundle
+        run: pyinstaller --clean --noconfirm MNT.spec
+
+      - name: Download appimagetool
+        run: |
+          mkdir -p build_tools
+          wget -q -O build_tools/appimagetool \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x build_tools/appimagetool
+
+      - name: Build AppImage
+        # appimagetool itself is an AppImage and needs FUSE to run;
+        # CI runners don't have FUSE so use --appimage-extract-and-run.
+        run: |
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          ./build_appimage.sh
+
+      - name: Verify AppImage size under GitHub's 2 GiB limit
+        run: |
+          SIZE=$(stat -c '%s' MNT-*-x86_64.AppImage)
+          LIMIT=2147483648
+          echo "AppImage size: $SIZE bytes (limit: $LIMIT)"
+          if [ "$SIZE" -ge "$LIMIT" ]; then
+            echo "ERROR: AppImage exceeds GitHub Releases per-file limit (2 GiB)"
+            echo "Trim the PySide6/onnxruntime/etc. bundle in MNT.spec further"
+            exit 1
+          fi
+
+      - name: Upload AppImage as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: MNT-*-x86_64.AppImage
+          retention-days: 7
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────
+  # Windows: PyInstaller → Inno Setup installer
+  # ─────────────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pillow
+
+      - name: Build PyInstaller bundle
+        run: pyinstaller --clean --noconfirm MNT.spec
+
+      - name: Install Inno Setup
+        # choco is pre-installed on windows-latest runners
+        run: choco install innosetup -y --no-progress
+
+      - name: Compile installer
+        # ISCC installs to "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" MNT.iss
+
+      - name: Verify installer size under GitHub's 2 GiB limit
+        shell: bash
+        run: |
+          SIZE=$(stat -c '%s' Output/MNT-Setup-*.exe)
+          LIMIT=2147483648
+          echo "Installer size: $SIZE bytes (limit: $LIMIT)"
+          if [ "$SIZE" -ge "$LIMIT" ]; then
+            echo "ERROR: Installer exceeds GitHub Releases per-file limit (2 GiB)"
+            exit 1
+          fi
+
+      - name: Upload installer as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: Output/MNT-Setup-*.exe
+          retention-days: 7
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────
+  # Release: attach both installers to the GitHub Release for this tag
+  # ─────────────────────────────────────────────────────────────────
+  release:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    # Only create a release on tag push, not on manual workflow_dispatch
+    # (which is just a dry-run build test).
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux AppImage
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-appimage
+          path: release_assets
+
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: release_assets
+
+      - name: List artifacts
+        run: ls -la release_assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Auto-generates release notes from commits since the last tag.
+          # Edit the release on GitHub afterwards to add a customer-
+          # facing changelog if you want.
+          generate_release_notes: true
+          # Default: NOT a pre-release. Change to true if shipping a beta.
+          prerelease: false
+          # Attach both installers
+          files: |
+            release_assets/MNT-*-x86_64.AppImage
+            release_assets/MNT-Setup-*.exe
+          # Body shown above the auto-generated changelog
+          body: |
+            ## Install
+
+            **Windows**: download `MNT-Setup-${{ github.ref_name }}.exe`, double-click, follow the install wizard.
+
+            **Linux (Ubuntu / Fedora / Arch / etc.)**: download `MNT-${{ github.ref_name }}-x86_64.AppImage`. Right-click → Properties → Permissions → check **"Allow executing as program"**, then double-click to run.
+
+            After install, activate with the license key sent at purchase. See [Help → Check for updates] inside the app for future updates.
