@@ -3,7 +3,10 @@
 The app's update notifier reads `https://api.github.com/repos/Jukree1997/Monitor_Noti_tester/releases/latest`
 on startup. To ship a new version that installed customers will see:
 
-## Steps
+## Steps (CI-automated, recommended)
+
+GitHub Actions builds both the Linux AppImage and the Windows installer
+automatically on tag push. You don't have to touch your Windows PC.
 
 1. **Bump the version** in `core/version.py`:
    ```python
@@ -11,7 +14,7 @@ on startup. To ship a new version that installed customers will see:
    ```
    Follow [semver](https://semver.org/): `MAJOR.MINOR.PATCH`.
 
-2. **Commit + tag**:
+2. **Commit + tag + push**:
    ```bash
    git add core/version.py
    git commit -m "Release v1.0.1"
@@ -19,27 +22,55 @@ on startup. To ship a new version that installed customers will see:
    git push origin main --tags
    ```
 
-3. **Build the installer** (separate packaging task — see future
-   `PACKAGING.md` once PyInstaller spec is in place):
-   ```bash
-   pyinstaller MNT.spec    # produces dist/MNT-Setup-1.0.1.exe
-   ```
+3. **Wait for CI** (~12-15 minutes). Watch progress at:
+   `https://github.com/Jukree1997/Monitor_Noti_tester/actions`
 
-4. **Publish the GitHub Release**:
-   ```bash
-   gh release create v1.0.1 ./dist/MNT-Setup-1.0.1.exe \
-     --title "v1.0.1" \
-     --notes "$(cat CHANGELOG-1.0.1.md)"
-   ```
-   - The `tag_name` (here `v1.0.1`) is what the update checker
-     compares against `core.version.__version__`. The leading `v` is
-     stripped before comparison.
-   - The `body` (release notes) is displayed in the update dialog,
-     truncated to ~500 chars with "see full notes on the release page"
-     if longer.
-   - The installer attached to the release is what the user downloads
-     when they click the **Download** button (their browser opens the
-     release page).
+   When both `build-linux` and `build-windows` succeed, a `release`
+   job creates the GitHub Release with both installers attached.
+
+4. **Done**. The new release is live at
+   `https://github.com/Jukree1997/Monitor_Noti_tester/releases/latest`.
+
+   Customers' running app will detect it within 24h (the auto-check
+   interval) and show an update dialog. They click Download → browser
+   opens the release page → they download the installer for their OS
+   → run it.
+
+## Steps (manual fallback)
+
+If CI is broken or you need to ship a release without going through
+GitHub Actions:
+
+1. Bump `__version__` + tag as above.
+2. On a Linux machine: `pyinstaller --clean --noconfirm MNT.spec && ./build_appimage.sh`
+3. On a Windows machine: see `WINDOWS_BUILD.md`
+4. `gh release create v1.0.1 MNT-1.0.1-x86_64.AppImage Output/MNT-Setup-1.0.1.exe --title "v1.0.1" --generate-notes`
+
+## Dry-run testing the workflow
+
+Before pushing a real tag, you can test the CI build without creating
+a Release:
+
+1. Go to https://github.com/Jukree1997/Monitor_Noti_tester/actions/workflows/release.yml
+2. Click **Run workflow** → pick `main` → confirm.
+3. CI builds both installers and uploads them as 7-day workflow
+   artifacts. No release is created.
+4. Download the artifacts from the workflow run page, test them
+   locally.
+
+This is the right move when you've changed `MNT.spec`, `MNT.iss`, or
+`build_appimage.sh` and want to verify the builds still work before
+committing to a real tag.
+
+## What the release URLs look like (for reference)
+
+- API endpoint the updater hits:
+  `https://api.github.com/repos/Jukree1997/Monitor_Noti_tester/releases/latest`
+- Release page customers land on after clicking Download in the app:
+  `https://github.com/Jukree1997/Monitor_Noti_tester/releases/tag/v1.0.1`
+- Direct installer URLs (linkable from your sales page):
+  - `…/releases/download/v1.0.1/MNT-Setup-1.0.1.exe`
+  - `…/releases/download/v1.0.1/MNT-1.0.1-x86_64.AppImage`
 
 ## Verifying the update notifier picked up the new release
 

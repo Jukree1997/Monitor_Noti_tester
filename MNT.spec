@@ -42,6 +42,40 @@ except Exception:
 # explicit is safer (Qt plugins, platform integration libs).
 pyside_datas, pyside_binaries, pyside_hidden = collect_all('PySide6')
 
+# Filter out Qt modules we don't import — saves ~288 MB on disk,
+# critical for keeping the AppImage under GitHub Releases' 2 GiB
+# per-file limit. Our code only uses QtCore / QtGui / QtWidgets.
+_QT_EXCLUDE_PATTERNS = (
+    # Qt WebEngine (Chromium engine, 194 MB) — we don't render web pages
+    'libQt6WebEngine', 'QtWebEngine', 'qtwebengine',
+    # Qt Quick / QML stack — we use Widgets, not QML
+    'libQt6Quick', 'libQt6Qml', 'QtQuick', 'QtQml',
+    'libQt6Labs', 'qmlls', 'qmlplugindump',
+    # Other unused Qt modules
+    'libQt6Designer', 'libQt6Pdf', 'libQt6PdfQuick', 'libQt6PdfWidgets',
+    'libQt6ShaderTools',
+    'libQt6Charts', 'libQt6DataVisualization',
+    'libQt6Bluetooth', 'libQt6Nfc', 'libQt6Positioning',
+    'libQt6SerialPort', 'libQt6SerialBus',
+    'libQt6Multimedia',  # we use opencv for video, not QtMultimedia
+    'libQt6Test',        # unit-test framework, not needed at runtime
+    'libQt6Help',        # online help system
+    'libQt6Sql',         # we don't use a Qt-managed DB
+)
+
+def _keep_pyside_item(item):
+    """Return True if a (dest, src, type) tuple should stay in the
+    bundle. Drops anything whose destination path contains one of
+    the excluded module names above."""
+    dest = (item[0] if item else '') or ''
+    return not any(p in dest for p in _QT_EXCLUDE_PATTERNS)
+
+pyside_binaries = [b for b in pyside_binaries if _keep_pyside_item(b)]
+pyside_datas = [d for d in pyside_datas if _keep_pyside_item(d)]
+pyside_hidden = [h for h in pyside_hidden
+                 if not any(p.replace('lib', '').replace('Qt6', 'Qt')
+                            in h for p in _QT_EXCLUDE_PATTERNS)]
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Hidden imports
