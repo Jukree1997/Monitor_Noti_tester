@@ -29,12 +29,19 @@ output_logs/
 output_videos/
 
 # ======================================
-# -------- 3. PYINSTALLER OUTPUT --------
+# -------- 3. INSTALLER BUILD OUTPUT --------
 # ======================================
-# Build artifacts — regenerate via `pyinstaller MNT.spec`
+# Regenerate via `pyinstaller MNT.spec` → `build_appimage.sh` (Linux) or
+# `ISCC.exe MNT.iss` (Windows).
 
 build/
 dist/
+# Inno Setup default output dir
+Output/
+# AppImage build artifacts (2+ GB)
+MNT-*-x86_64.AppImage
+# appimagetool binary (re-download per WINDOWS_BUILD.md / build_appimage.sh)
+build_tools/appimagetool
 
 # ======================================
 # -------- 4. OS / EDITOR --------

@@ -1,9 +1,19 @@
-# Packaging MNT with PyInstaller
+# Packaging MNT
 
-This is the spike doc — a working build on Linux with the spec in
-`MNT.spec`. The Windows build is expected to mostly Just Work but
-needs end-to-end verification on a real Windows machine, plus
-follow-up work for the installer (Inno Setup or NSIS).
+Three build stages:
+
+| Stage | Output | What for |
+|---|---|---|
+| **1. PyInstaller** | `dist/MNT/` (folder) | The bundled app — same on every platform but contents are platform-specific |
+| **2. AppImage (Linux)** | `MNT-1.0.0-x86_64.AppImage` | Single-file customer download for Ubuntu / Fedora / Arch / etc. |
+| **2. Inno Setup (Windows)** | `Output/MNT-Setup-1.0.0.exe` | Windows installer with Start Menu shortcut, uninstaller, upgrade detection |
+
+Stage 1 (PyInstaller) is documented below. Stage 2 builds are platform-
+specific — see:
+- **Linux AppImage**: `build_appimage.sh` (run on Linux; takes ~1 min)
+- **Windows installer**: `WINDOWS_BUILD.md` (run on Windows; takes ~5 min total)
+
+This document covers Stage 1 only.
 
 ## Quick start
 

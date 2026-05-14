@@ -1,0 +1,31 @@
+END-USER LICENSE AGREEMENT — PLACEHOLDER
+
+This is a placeholder shown during installation. Replace with your
+real EULA before public release.
+
+By installing Baksters Notification Runner, you agree to the
+following terms:
+
+1. LICENSE GRANT
+   Baksters grants you a non-exclusive, non-transferable license to
+   install and use this software on the number of computers specified
+   by your license tier (Starter, Pro, or Enterprise).
+
+2. RESTRICTIONS
+   You may not redistribute, reverse-engineer, or modify the software.
+   Sharing your license key with others is a breach of this agreement.
+
+3. ACTIVATION
+   The software requires online activation against the Baksters
+   licensing server. After activation, the software may run offline
+   for up to 30 days before requiring re-validation.
+
+4. NO WARRANTY
+   The software is provided "as is" without warranty of any kind.
+
+5. CONTACT
+   For support or sales: baksters.subscriptionai@gmail.com
+
+(This is a placeholder. A lawyer-reviewed EULA covering Thai consumer
+law, GDPR if selling in EU, indemnification, etc. should replace this
+before commercial launch.)
