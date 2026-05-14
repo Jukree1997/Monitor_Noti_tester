@@ -61,6 +61,12 @@ SetupIconFile=build_assets\icon.ico
 ; Uninstaller appears in Apps & Features under this name
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
+; Detect a running MNT.exe via Windows Restart Manager and offer to
+; close it before overwriting files. Replaces the previous [Code]
+; section's custom taskkill loop with the built-in (and Pascal-free)
+; equivalent.
+CloseApplications=yes
+RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -93,27 +99,3 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 ; only what it installed, so user-added files are safe automatically.
 ; The license cache lives in %APPDATA%\Baksters\MNT\ and survives
 ; uninstall by design (so a reinstall just works).
-
-[Code]
-; Detect a running MNT.exe and ask the user to close it before
-; overwriting files. Without this, the installer would fail mid-copy
-; on file-in-use errors.
-function InitializeSetup(): Boolean;
-var
-  ErrCode: Integer;
-begin
-  Result := True;
-  // Loop until either MNT.exe isn't running, or the user gives up.
-  while Exec('taskkill', '/FI "IMAGENAME eq MNT.exe" /NH', '', SW_HIDE, ewWaitUntilTerminated, ErrCode) do
-  begin
-    // taskkill's exit code is 128 when nothing matched — that means
-    // no MNT.exe running, we can proceed.
-    if ErrCode = 128 then
-      break;
-    if MsgBox('Monitor_Noti_tester is currently running. Please close it before installing the update.' + #13#10 + #13#10 + 'Click Retry once you''ve closed it, or Cancel to abort.', mbConfirmation, MB_RETRYCANCEL) = IDCANCEL then
-    begin
-      Result := False;
-      break;
-    end;
-  end;
-end;
