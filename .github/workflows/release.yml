@@ -22,7 +22,15 @@ jobs:
   # Linux: PyInstaller → AppImage
   # ─────────────────────────────────────────────────────────────────
   build-linux:
-    runs-on: ubuntu-latest
+    # PIN to ubuntu-22.04 (glibc 2.35), NOT ubuntu-latest.
+    # `ubuntu-latest` moved to 24.04 (glibc 2.39) in April 2025; the
+    # resulting AppImage refuses to start on 22.04 LTS systems with
+    # "GLIBC_2.38 not found" because libpython linked against the
+    # newer host glibc. 22.04 is the oldest GitHub-supported runner
+    # (20.04 was retired) and covers Ubuntu 22.04 LTS + 24.04 LTS +
+    # Debian 12+. Customers on older distros need to upgrade or use
+    # the libfuse2 + extract-and-run path.
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -77,6 +85,31 @@ jobs:
             echo "Trim the PySide6/onnxruntime/etc. bundle in MNT.spec further"
             exit 1
           fi
+
+      - name: Verify bundled libs don't require glibc > 2.35
+        # Customers on Ubuntu 22.04 (glibc 2.35) will get "GLIBC_2.X
+        # not found" if any bundled .so requires a newer symbol. This
+        # check fails the build if that happens — usually means the
+        # runner version was bumped and we need to re-pin.
+        run: |
+          set -e
+          MAX_ALLOWED="2.35"
+          echo "Scanning bundled .so files for required glibc symbols (max allowed: GLIBC_${MAX_ALLOWED})"
+          HIGHEST=$(find dist/MNT -name "*.so*" -type f -exec objdump -T {} \; 2>/dev/null \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+            | sort -V \
+            | tail -1)
+          echo "Highest glibc requirement found in bundle: $HIGHEST"
+          # Compare HIGHEST vs GLIBC_2.35 using version sort
+          HIGHEST_VER="${HIGHEST#GLIBC_}"
+          if [ "$(printf '%s\n%s\n' "$HIGHEST_VER" "$MAX_ALLOWED" | sort -V | tail -1)" != "$MAX_ALLOWED" ]; then
+            echo "ERROR: Bundle requires GLIBC_${HIGHEST_VER} which is > ${MAX_ALLOWED}"
+            echo "Customers on Ubuntu 22.04 will see 'GLIBC not found' errors."
+            echo "Either pin the runner to an older Ubuntu (currently ubuntu-22.04)"
+            echo "or update MAX_ALLOWED above if you've intentionally raised the floor."
+            exit 1
+          fi
+          echo "OK — bundle is compatible with glibc ${MAX_ALLOWED}+"
 
       - name: Upload AppImage as workflow artifact
         uses: actions/upload-artifact@v4
@@ -182,8 +215,21 @@ jobs:
           body: |
             ## Install
 
-            **Windows**: download `MNT-Setup-${{ github.ref_name }}.exe`, double-click, follow the install wizard.
+            ### Windows
 
-            **Linux (Ubuntu / Fedora / Arch / etc.)**: download `MNT-${{ github.ref_name }}-x86_64.AppImage`. Right-click → Properties → Permissions → check **"Allow executing as program"**, then double-click to run.
+            Download `MNT-Setup-${{ github.ref_name }}.exe`, double-click, follow the install wizard.
 
-            After install, activate with the license key sent at purchase. See [Help → Check for updates] inside the app for future updates.
+            ### Linux (Ubuntu 22.04+ / Debian 12+ / Fedora / Arch)
+
+            1. Download `MNT-${{ github.ref_name }}-x86_64.AppImage`.
+            2. Make it executable: right-click → Properties → Permissions → check **"Allow executing as program"** (or `chmod +x` in terminal).
+            3. **If you're on Ubuntu 22.04+ or any distro that doesn't ship libfuse2**, install it once:
+               ```
+               sudo apt update && sudo apt install -y libfuse2
+               ```
+               (or `libfuse2t64` on Ubuntu 24.04+ if `libfuse2` reports missing). Without this, double-click does nothing.
+            4. Double-click the AppImage to launch.
+
+            ### After install
+
+            Activate with the license key sent at purchase. See **Help → Check for updates** inside the app for future updates.
