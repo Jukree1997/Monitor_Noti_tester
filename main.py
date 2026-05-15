@@ -22,6 +22,29 @@ from ui.license_dialog import ActivationDialog
 from ui.main_window import MainWindow
 
 
+def _install_uncaught_exception_hook():
+    """PySide6's default slot handler silently swallows exceptions
+    raised inside Qt callbacks — that's how the v1.0.0/v1.0.1 paths
+    bug (mkdir on read-only FS) presented as "click does nothing".
+    Install a process-wide hook that turns any unhandled exception
+    into a visible error dialog instead. Logging to stderr still
+    happens; this just adds a user-visible surface."""
+    import traceback
+    from PySide6.QtWidgets import QMessageBox
+
+    def _hook(exc_type, exc_value, tb):
+        text = "".join(traceback.format_exception(exc_type, exc_value, tb))
+        sys.__excepthook__(exc_type, exc_value, tb)  # still log to stderr
+        try:
+            QMessageBox.critical(None, "Internal error", text)
+        except Exception:
+            # If the GUI itself is dying we can't pop a dialog; the
+            # stderr trace above is the fallback.
+            pass
+
+    sys.excepthook = _hook
+
+
 def main():
     app = QApplication(sys.argv)
     # Set org/app name so QSettings is consistent across the app
@@ -29,6 +52,7 @@ def main():
     app.setOrganizationName("Baksters")
     app.setApplicationName("MNT")
     app.setStyle("Fusion")
+    _install_uncaught_exception_hook()
 
     # Apply dark theme
     app.setStyleSheet("""

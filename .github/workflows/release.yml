@@ -11,6 +11,16 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Platforms to build (manual runs only)'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - linux-only
+          - windows-only
 
 # Both build jobs run in parallel. The release job waits for both,
 # downloads their artifacts, and creates the GitHub Release.
@@ -22,6 +32,12 @@ jobs:
   # Linux: PyInstaller → AppImage
   # ─────────────────────────────────────────────────────────────────
   build-linux:
+    # Tag pushes always build everything. Manual dispatch can choose
+    # 'linux-only' for fast iteration when you don't need the slower
+    # Windows build (and aren't ready to ship publicly).
+    if: |
+      github.event_name == 'push' ||
+      github.event.inputs.platforms != 'windows-only'
     # PIN to ubuntu-22.04 (glibc 2.35), NOT ubuntu-latest.
     # `ubuntu-latest` moved to 24.04 (glibc 2.39) in April 2025; the
     # resulting AppImage refuses to start on 22.04 LTS systems with
@@ -123,6 +139,11 @@ jobs:
   # Windows: PyInstaller → Inno Setup installer
   # ─────────────────────────────────────────────────────────────────
   build-windows:
+    # Same logic as build-linux above — tag pushes always run this;
+    # manual dispatch can skip it with platforms=linux-only.
+    if: |
+      github.event_name == 'push' ||
+      github.event.inputs.platforms != 'linux-only'
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
