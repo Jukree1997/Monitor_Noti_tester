@@ -44,7 +44,15 @@ MNT-*-x86_64.AppImage
 build_tools/appimagetool
 
 # ======================================
-# -------- 4. OS / EDITOR --------
+# -------- 4. INCOMING (bug reports etc.) --------
+# ======================================
+# Drop zone for files transferred from other machines during testing.
+# Not part of the source tree.
+
+incoming/
+
+# ======================================
+# -------- 5. OS / EDITOR --------
 # ======================================
 
 .DS_Store
