@@ -143,4 +143,20 @@ def main():
 
 
 if __name__ == "__main__":
+    # multiprocessing.freeze_support() MUST be called before main() in a
+    # frozen (PyInstaller) build that uses mp.set_start_method("spawn").
+    # Without it, every spawned worker process re-runs this whole script
+    # from the top — hitting this __main__ block and constructing a new
+    # QApplication + MainWindow — which is exactly the "second app
+    # window opens when I click Fleet ▷ Test" bug reported on v1.0.1.
+    #
+    # When called from a spawn-child, freeze_support detects the sentinel
+    # CLI args PyInstaller forwards, dispatches to the worker callable
+    # (core.worker_process.worker_main in our case), and exits. The
+    # parent's main() never runs in that child.
+    #
+    # In non-frozen / source runs, freeze_support is a no-op — the
+    # 'fork' start method on Linux doesn't re-import the entry script.
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()
