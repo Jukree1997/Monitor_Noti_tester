@@ -338,7 +338,7 @@ class Sidebar(QWidget):
             QPushButton:hover { background-color: #2E6585; }
             QPushButton:disabled { background-color: #555; color: #aaa; }
         """)
-        self.btn_load_project.clicked.connect(self.load_project_requested.emit)
+        self.btn_load_project.clicked.connect(self.load_project_requested)
         load_save_row.addWidget(self.btn_load_project, 1)
 
         self.btn_save_project = styled_button("Save Project")
@@ -349,7 +349,7 @@ class Sidebar(QWidget):
             QPushButton:hover { background-color: #175E6D; }
             QPushButton:disabled { background-color: #555; color: #aaa; }
         """)
-        self.btn_save_project.clicked.connect(self.save_project_requested.emit)
+        self.btn_save_project.clicked.connect(self.save_project_requested)
         load_save_row.addWidget(self.btn_save_project, 1)
 
         lay.addLayout(load_save_row)
@@ -376,7 +376,7 @@ class Sidebar(QWidget):
                 border-radius: 4px; padding: 4px 10px; font-size: 11px; }
             QPushButton:hover { background-color: #666; }
         """)
-        self.btn_browse_video.clicked.connect(self.browse_video_requested.emit)
+        self.btn_browse_video.clicked.connect(self.browse_video_requested)
         self.btn_browse_video.setVisible(False)
         lay.addWidget(self.btn_browse_video)
 
@@ -837,7 +837,7 @@ class Sidebar(QWidget):
         options_row.addStretch()
         self.combo_draw_mode = QComboBox()
         self.combo_draw_mode.addItems(["Dot", "Box"])
-        self.combo_draw_mode.currentTextChanged.connect(self.draw_mode_changed.emit)
+        self.combo_draw_mode.currentTextChanged.connect(self.draw_mode_changed)
         options_row.addWidget(self.combo_draw_mode)
         bottom_layout.addLayout(options_row)
 
@@ -895,7 +895,7 @@ class Sidebar(QWidget):
             QPushButton:hover { background-color: #2E6585; }
             QPushButton:disabled { background-color: #555; color: #aaa; }
         """)
-        self.btn_export_events.clicked.connect(self.export_events_requested.emit)
+        self.btn_export_events.clicked.connect(self.export_events_requested)
         clear_row.addWidget(self.btn_export_events)
         self.btn_clear_events = QPushButton("Clear")
         self.btn_clear_events.setFixedHeight(24)

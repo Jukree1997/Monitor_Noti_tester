@@ -114,7 +114,7 @@ class FleetSidebar(QWidget):
         self._btn_add = QPushButton("+ Add Project")
         self._btn_add.setFixedHeight(30)
         self._btn_add.setStyleSheet(_btn_css("#3A7CA5", "#2E6585"))
-        self._btn_add.clicked.connect(self.add_project_requested.emit)
+        self._btn_add.clicked.connect(self.add_project_requested)
         lay.addWidget(self._btn_add)
 
         run_row = QHBoxLayout()
@@ -122,20 +122,20 @@ class FleetSidebar(QWidget):
         self._btn_start_all = QPushButton("▶ Start All")
         self._btn_start_all.setFixedHeight(28)
         self._btn_start_all.setStyleSheet(_btn_css("#2E8B57", "#256B45"))
-        self._btn_start_all.clicked.connect(self.start_all_requested.emit)
+        self._btn_start_all.clicked.connect(self.start_all_requested)
         run_row.addWidget(self._btn_start_all)
 
         self._btn_test_all = QPushButton("▷ Test All")
         self._btn_test_all.setFixedHeight(28)
         self._btn_test_all.setStyleSheet(_btn_css("#1F7A8C", "#175E6D"))
-        self._btn_test_all.clicked.connect(self.test_all_requested.emit)
+        self._btn_test_all.clicked.connect(self.test_all_requested)
         run_row.addWidget(self._btn_test_all)
         lay.addLayout(run_row)
 
         self._btn_stop_all = QPushButton("■ Stop All")
         self._btn_stop_all.setFixedHeight(28)
         self._btn_stop_all.setStyleSheet(_btn_css("#CC3333", "#AA2222"))
-        self._btn_stop_all.clicked.connect(self.stop_all_requested.emit)
+        self._btn_stop_all.clicked.connect(self.stop_all_requested)
         lay.addWidget(self._btn_stop_all)
 
         # Fleet save / load
@@ -144,12 +144,12 @@ class FleetSidebar(QWidget):
         self._btn_save_fleet = QPushButton("\U0001F4BE Save Fleet")
         self._btn_save_fleet.setFixedHeight(26)
         self._btn_save_fleet.setStyleSheet(_btn_css("#666", "#555"))
-        self._btn_save_fleet.clicked.connect(self.save_fleet_requested.emit)
+        self._btn_save_fleet.clicked.connect(self.save_fleet_requested)
         fleet_io_row.addWidget(self._btn_save_fleet)
         self._btn_load_fleet = QPushButton("\U0001F4C2 Load Fleet")
         self._btn_load_fleet.setFixedHeight(26)
         self._btn_load_fleet.setStyleSheet(_btn_css("#666", "#555"))
-        self._btn_load_fleet.clicked.connect(self.load_fleet_requested.emit)
+        self._btn_load_fleet.clicked.connect(self.load_fleet_requested)
         fleet_io_row.addWidget(self._btn_load_fleet)
         lay.addLayout(fleet_io_row)
 

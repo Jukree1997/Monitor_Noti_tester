@@ -185,7 +185,7 @@ class EditorSidebar(QWidget):
             QPushButton:hover { background-color: #2E6585; }
             QPushButton:disabled { background-color: #555; color: #aaa; }
         """)
-        self.btn_load_project.clicked.connect(self.load_project_requested.emit)
+        self.btn_load_project.clicked.connect(self.load_project_requested)
         project_row.addWidget(self.btn_load_project, 1)
 
         self.btn_save_project = styled_button("Save Project")
@@ -195,7 +195,7 @@ class EditorSidebar(QWidget):
             QPushButton:hover { background-color: #175E6D; }
             QPushButton:disabled { background-color: #555; color: #aaa; }
         """)
-        self.btn_save_project.clicked.connect(self.save_project_requested.emit)
+        self.btn_save_project.clicked.connect(self.save_project_requested)
         project_row.addWidget(self.btn_save_project, 1)
 
         main_layout.addLayout(project_row)
@@ -252,7 +252,7 @@ class EditorSidebar(QWidget):
         row.addWidget(self.model_entry)
 
         self.btn_browse_model = styled_button("Browse", width=70)
-        self.btn_browse_model.clicked.connect(self.browse_model.emit)
+        self.btn_browse_model.clicked.connect(self.browse_model)
         row.addWidget(self.btn_browse_model)
         lay.addLayout(row)
 
@@ -570,7 +570,7 @@ class EditorSidebar(QWidget):
 
         self.combo_draw_mode = QComboBox()
         self.combo_draw_mode.addItems(["Box", "Dot"])
-        self.combo_draw_mode.currentTextChanged.connect(self.draw_mode_changed.emit)
+        self.combo_draw_mode.currentTextChanged.connect(self.draw_mode_changed)
         options_row.addWidget(self.combo_draw_mode)
 
         bottom_layout.addLayout(options_row)
