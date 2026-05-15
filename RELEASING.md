@@ -46,6 +46,34 @@ GitHub Actions:
 3. On a Windows machine: see `WINDOWS_BUILD.md`
 4. `gh release create v1.0.1 MNT-1.0.1-x86_64.AppImage Output/MNT-Setup-1.0.1.exe --title "v1.0.1" --generate-notes`
 
+## Linux compatibility floor
+
+The CI Linux build is **pinned to `ubuntu-22.04`** (glibc 2.35). This
+means the AppImage runs on Ubuntu 22.04 LTS, Ubuntu 24.04 LTS, Debian
+12+, and most other modern distros. It will NOT run on older systems
+(Ubuntu 20.04 LTS, Debian 11, RHEL 7) — those need to upgrade or use
+`--appimage-extract-and-run` with a separately bundled python.
+
+The CI workflow includes a `Verify bundled libs don't require glibc > 2.35`
+step that fails the build if any bundled .so requires a newer glibc
+symbol. This catches regressions if `ubuntu-latest` ever moves again.
+
+### libfuse2 — required on the customer's machine
+
+AppImages mount themselves via FUSE2 at runtime. Ubuntu 22.04+ and
+some other modern distros stopped shipping `libfuse2` by default.
+Customers on those systems will see "double-click does nothing" until
+they install it once:
+
+```
+sudo apt update && sudo apt install -y libfuse2
+```
+
+(Or `libfuse2t64` on Ubuntu 24.04+ if the above reports missing.)
+
+The release body in the CI workflow tells customers this step. If you
+ship release notes manually elsewhere, include the same hint.
+
 ## Dry-run testing the workflow
 
 Before pushing a real tag, you can test the CI build without creating
