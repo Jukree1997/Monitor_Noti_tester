@@ -12,5 +12,5 @@ from __future__ import annotations
 # -------- VERSION --------
 # ======================================
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __product_name__ = "Baksters Notification Runner"
