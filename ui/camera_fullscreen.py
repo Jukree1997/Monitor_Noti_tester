@@ -57,7 +57,7 @@ class CameraFullScreenView(QWidget):
         self._btn_back = QPushButton("← Back")
         self._btn_back.setFixedHeight(28)
         self._btn_back.setStyleSheet(_btn_css("#3A7CA5", "#2E6585"))
-        self._btn_back.clicked.connect(self.back_clicked.emit)
+        self._btn_back.clicked.connect(self.back_clicked)
         bar_lay.addWidget(self._btn_back)
 
         self._lbl_name = QLabel("(no camera)")
@@ -79,7 +79,7 @@ class CameraFullScreenView(QWidget):
         self._video.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._video.setSizePolicy(QSizePolicy.Policy.Expanding,
                                    QSizePolicy.Policy.Expanding)
-        self._video.clicked.connect(self.back_clicked.emit)
+        self._video.clicked.connect(self.back_clicked)
         self._video.setCursor(Qt.CursorShape.PointingHandCursor)
         self._video.setToolTip("Click to return to overview")
         lay.addWidget(self._video, 1)
